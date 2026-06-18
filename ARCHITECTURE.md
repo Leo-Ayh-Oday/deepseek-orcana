@@ -69,10 +69,6 @@ These are recorded in the codebase to prevent regression:
 5. **Don't batch external data at start-of-turn only** — stale research evidence degrades decision quality.
 6. **Don't silently swallow rollback failures** — callers need to know when file state is inconsistent.
 
-## Code-as-Action
-
-Orcana uses JavaScript `new Function()` as a fast code execution path. ~100 lines of JS achieves what would take ~2000 lines of Python AST manipulation. This is only used for structured data transforms, never for arbitrary code execution.
-
 ## Ripple Engine
 
 A TypeScript-aware code intelligence layer that:

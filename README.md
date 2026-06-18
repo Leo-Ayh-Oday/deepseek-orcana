@@ -27,7 +27,6 @@ Built with Bun + TypeScript + Ink (React TUI). Uses DeepSeek's Anthropic-compati
 | **Permission Gate** | Three-tier allow/deny rules before any tool executes |
 | **Sandbox** | Path-guard + job-object isolation (Windows native) |
 | **Memory** | SQLite hybrid memory with checkpoint cycles |
-| **Code-as-Action** | ~100 lines of JS replacing ~2000 lines of AST manipulation |
 
 ## Quick Start
 

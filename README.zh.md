@@ -27,7 +27,6 @@ Orcana = Orchestra + Cana（迦拿，变水为酒的奇迹），寓意"把代码
 | **权限门** | 工具执行前三级 allow/deny 规则检查 |
 | **沙箱** | 路径守卫 + Job Object 隔离（Windows 原生） |
 | **混合记忆** | SQLite 混合存储 + 检查点周期 |
-| **Code-as-Action** | ~100 行 JS 替代 ~2000 行 Python AST |
 
 ## 快速开始
 
