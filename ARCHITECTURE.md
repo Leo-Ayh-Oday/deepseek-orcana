@@ -363,6 +363,137 @@ adaptiveCheckpointThreshold(contextBudget%, complexityMetrics)
 
 Saves structured snapshot: session ID, master plan, task steps, changed files, verification results, conversation token count.
 
+## DeepSeek V4 — Unique Mechanisms
+
+Orcana's entire multi-tier reasoning architecture depends on capabilities that only DeepSeek V4 provides. These are not generic LLM features — they are DeepSeek-specific APIs and model behaviors that the codebase is architected around.
+
+### 1. Thinking / Reasoning Tokens (V4 Proprietary)
+
+`src/provider/deepseek.ts:145-184`
+
+DeepSeek V4 emits `thinking_delta` stream events — the model's internal reasoning chain exposed as a separate content block type with its own signature. Orcana captures, stores, and operationalizes these:
+
+```
+stream event → content_block_start(type="thinking") →
+  thinking_delta → accumulate → content_block_stop →
+    thinkingBlocks[] → ThinkingStore.persist()
+```
+
+**Downstream uses of thinking chains:**
+
+| Use | Where | Mechanism |
+|-----|-------|-----------|
+| **Thinking Store** | `memory/thinking-store.ts` | JSONL-persisted reasoning records with tags + query hashes |
+| **Compaction** | `loop.ts:1744-1817` | At 40% budget, Flash model compresses chains into `key_insights/verified/discarded/open` → merged into cold memory |
+| **Semantic Recall** | `loop.ts:1819-1861` | Every 3 rounds, Flash-scored similarity search over historical chains → inject relevant context |
+| **Token Accounting** | `loop.ts:1196` | thinking blocks counted separately from output tokens for budget tracking |
+| **Cache Anatomy** | `context/cache-anatomy.ts` | Thinking overhead monitored; >40% of budget triggers thinking compaction |
+
+**Why this matters**: No other provider exposes reasoning chains at the protocol level with this granularity. OpenAI's "reasoning" is a black-box mode toggle. Anthropic doesn't expose it at all.
+
+### 2. Flash Model as Multi-Purpose Sub-Processor
+
+`src/provider/registry.ts:52-60`
+
+DeepSeek V4 Flash (`deepseek-v4-flash`) — ~1/10 cost, ~1/3 latency, no thinking overhead. Orcana uses it as a **sub-processor** in 6 independent roles:
+
+| Role | Module | Purpose |
+|------|--------|---------|
+| **Flash Judge** | `agent/flash-judge.ts:56` | Independent completion verifier — reads conversation, returns SATISFIED/NOT_SATISFIED/IMPOSSIBLE |
+| **Flash Triage** | `agent/flash-triage.ts:35` | One-call semantic classification replacing 4 keyword classifiers |
+| **Thinking Compaction** | `loop.ts:1762` | Compresses accumulated thinking chains into structured insights |
+| **Semantic Recall** | `loop.ts:1834` | Scores historical thinking chain relevance to current query |
+| **Knowledge Distillation** | `memory/distiller.ts:92` | Extracts structured knowledge from web search results |
+| **Plan Judging** | `evaluator/plan-judge.ts` | Cold model evaluates the agent's plan from outside the conversation |
+
+Each role has its own prompt template, circuit breaker, and graceful degradation path. The Flash model never touches the main conversation — it operates in **separate, stateless calls** with zero identity alignment to the main agent.
+
+### 3. Fill-in-the-Middle (FIM) — V4 Beta API
+
+`src/provider/fim.ts` + `src/tools/file.ts:445`
+
+DeepSeek V4 exposes a `/beta/completions` endpoint with FIM support — given `{prompt, suffix}`, the model fills the middle. Orcana exposes this as the `edit_fim` tool:
+
+```
+Agent: edit_fim { filePath, instruction, startLine, endLine }
+  → FimEditor reads file, splits at line boundaries
+  → POST /beta/completions { prompt: prefix, suffix: suffix }
+  → Returns filled middle text
+```
+
+Also supports `editFunction(filePath, instruction, functionName)` — scans for function boundaries and fills within them. This is **not** a generic LLM feature — it's a DeepSeek-specific API endpoint.
+
+### 4. 1M Context Window + Budget Gating
+
+`loop.ts:684` — `CONTEXT_MAX = 1_048_576`
+
+The entire budget gating system is calibrated to a 1M token window:
+
+```
+normal   (<524K):  all features active
+degraded (524K-629K): finish current stage, no new exploration
+block    (>629K):   force compaction or fresh continuation
+```
+
+Thresholds are configurable via `DEEPSEEK_CONTEXT_WARN_RATIO` / `DEEPSEEK_CONTEXT_BLOCK_RATIO`.
+
+### 5. Prefix Auto-Caching
+
+`src/provider/deepseek.ts:42-58` + `src/provider/cache-tracker.ts`
+
+DeepSeek V4 auto-caches prompt prefixes. Orcana explicitly marks cache breakpoints:
+
+```typescript
+// deepseek.ts:47-58
+const cacheControl = { type: "ephemeral" }
+system: [{ type: "text", text: options.system, cache_control: cacheControl }]
+messages[0]: [{ type: "text", text: m.content, cache_control: cacheControl }]
+```
+
+The **Frozen Stable Prefix** pattern (`loop.ts:733-742`) exploits this: system prompt + project context kernel + cold memory + skill prompts are computed once in round 0 and frozen. All subsequent rounds keep this prefix byte-identical, so DeepSeek's server-side cache hits on every round.
+
+`CacheTracker` (`provider/cache-tracker.ts`) models the real prefix shape (model + system + tools + messages), predicts hit/miss, and surfaces `firstChangedSection` for debugging.
+
+### 6. Thinking Budget Auto-Escalation
+
+`src/provider/router.ts:62-70`
+
+V4 Pro supports two thinking effort tiers: `high` (16K tokens) and `max` (32K tokens). Orcana auto-escalates:
+
+```
+consecutiveErrors ≥ 3  →  max thinking (32K)
+modifiedFiles ≥ 5      →  max thinking (32K)
+readonly mode          →  high thinking (16K)
+```
+
+Additionally, the **agent itself** can request max thinking via the `request_deeper_thinking` meta-tool (`loop.ts:1383-1385`): when the model realizes it's stuck, it calls this tool and the next round gets a 32K thinking budget.
+
+### 7. Cost Mode — Two-Tier Budget Control
+
+`src/provider/cost-policy.ts`
+
+```
+normal: all 10 optional Flash calls enabled
+strict: 10 optional calls disabled (chat_lite, thinking_compaction,
+        semantic_recall_score, knowledge_distill, flash_triage,
+        completion_judge, plan_judge, ambiguity_detector,
+        cold_memory_audit)
+```
+
+Set via `DEEPSEEK_COST_MODE=strict`. In strict mode, the agent works with Pro-only calls — all Flash sub-processing is cut.
+
+### Summary: What Orcana Gets From V4 That No Other Model Provides
+
+| V4 Capability | Orcana Usage | Alternative on Other Models |
+|---------------|-------------|----------------------------|
+| **Thinking tokens** | Persist, compact, recall reasoning chains | ❌ Not available |
+| **Flash model** | 6 independent sub-processor roles | Separate API key to another provider |
+| **FIM endpoint** | `edit_fim` tool | ❌ Not available |
+| **1M context** | 50-round loops with 26 gates | Smaller window → more compaction |
+| **Prefix auto-cache** | Frozen stable prefix across all rounds | No cache → 5-10× cost increase |
+| **Thinking budget tiers** | Auto-escalate to 32K on error cascades | ❌ Not available |
+| **Cost mode** | Normal/strict toggle | No equivalent |
+
 ## Tool System
 
 `src/tools/registry.ts` + individual tool files

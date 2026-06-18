@@ -19,23 +19,26 @@ Built with Bun + TypeScript + Ink (React TUI). Uses DeepSeek's Anthropic-compati
 
 ## Highlights
 
-**26 safety mechanisms per round.** Every agent loop iteration passes through a chain of independent gates — context budget, intent, ripple block, permission, rate limiting, quality gate, completion gate, Flash Judge, and more. No single mechanism is trusted alone.
+**26 safety mechanisms per round.** Every agent loop iteration passes through a chain of independent gates. No single mechanism is trusted alone. Built on **DeepSeek V4's unique capabilities** — thinking tokens, Flash sub-processing, FIM, 1M context, prefix caching — that no other model provides in combination.
 
 | Layer | Mechanism | Source |
 |-------|-----------|--------|
-| **Entrance** | Flash Triage — one Flash call replaces 4 keyword classifiers | `src/agent/flash-triage.ts` |
-| **Budget** | Context budget: WARN at 50%, BLOCK at 60% | `loop.ts:294-315` |
+| **Thinking** | Reasoning chain capture → persist, compact, recall across sessions (V4 proprietary) | `deepseek.ts:145-184` |
+| **Flash Sub-Processing** | 6 independent Flash roles: Judge, Triage, Compaction, Recall, Distill, Plan-Judge | `flash-judge.ts`, `flash-triage.ts` |
+| **FIM** | Fill-in-the-Middle editing via V4 `/beta/completions` endpoint | `provider/fim.ts` |
+| **Budget** | 1M context window: WARN at 524K, BLOCK at 629K | `loop.ts:684` |
+| **Cache** | Prefix auto-caching → frozen stable prefix computed once, hits every round | `deepseek.ts:42`, `loop.ts:733` |
+| **Thinking Escalation** | Auto-upgrade to 32K max thinking on error cascades (≥3) or broad edits (≥5) | `router.ts:62-70` |
+| **Entrance** | Flash Triage — one Flash call replaces 4 keyword classifiers | `agent/flash-triage.ts` |
 | **Safety** | Gate overflow: 3 blocks → strategy switch, 5 → BLOCKED | `loop.ts:1562-1607` |
 | **Learning** | Error tracker: 2 repeated failures → web search prompt, 4 → admit defeat | `loop.ts:96-123` |
-| **Verification** | Flash Judge — independent model evaluates completion (SATISFIED/NOT_SATISFIED/IMPOSSIBLE) | `src/agent/flash-judge.ts` |
-| **Testimony** | Testimony Ledger — tracks agent promises vs delivery, detects circular promises | `flash-judge.ts:196-249` |
+| **Verification** | Flash Judge — independent model evaluates completion (SATISFIED/NOT_SATISFIED/IMPOSSIBLE) | `agent/flash-judge.ts` |
+| **Testimony** | Testimony Ledger — tracks promises vs delivery, detects circular promises | `flash-judge.ts:196-249` |
 | **Dependency** | Ripple Engine — TypeScript-aware cascade detection, blocks writes until resolved | `src/ripple/` |
 | **Sandbox** | Job Object (kernel32) + PathGuard + env whitelist + timeout | `src/sandbox/` |
 | **Memory** | CJK bigram+trigram tokenizer, thinking compaction, knowledge reconciliation | `src/memory/` |
-| **Truncation** | Smart head+tail with error-aware allocation (70% head on errors, 85% otherwise) | `loop.ts:1357-1376` |
-| **Cache** | Frozen stable prefix — computed once, reused all rounds preserving Anthropic prefix cache | `loop.ts:733-742` |
 
-→ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full 26-gate loop anatomy and deep dives into each system.
+→ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full 26-gate loop anatomy, DeepSeek V4 mechanism deep-dives, and anti-loop engineering.
 
 ## Quick Start
 

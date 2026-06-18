@@ -23,21 +23,24 @@ Orcana = Orchestra + Cana（迦拿，变水为酒的奇迹），寓意"把代码
 
 ## 亮点
 
-**每轮 26 道安全机制。** 每次 agent 循环都穿过一系列独立门控——上下文预算、意图门、涟漪阻止、权限门、频率限制、质量门、完成门、Flash Judge 等。不信任任何单一机制。
+**每轮 26 道安全机制。** 每次 agent 循环都穿过一系列独立门控。不信任任何单一机制。基于 **DeepSeek V4 独有能力**——思考令牌、Flash 子处理、FIM、1M 上下文、前缀缓存——其他模型无法组合提供。
 
 | 层次 | 机制 | 源码 |
 |------|------|------|
-| **入口** | Flash Triage——一次 Flash 调用替代 4 个关键词分类器 | `src/agent/flash-triage.ts` |
-| **预算** | 上下文预算：50% 警告，60% 阻止 | `loop.ts:294-315` |
+| **思考** | 推理链捕获 → 持久化、压缩、跨会话回召（V4 专有） | `deepseek.ts:145-184` |
+| **Flash 子处理** | 6 个独立 Flash 角色：Judge、Triage、Compaction、Recall、Distill、Plan-Judge | `flash-judge.ts`, `flash-triage.ts` |
+| **FIM** | 填空编辑，通过 V4 `/beta/completions` 端点 | `provider/fim.ts` |
+| **预算** | 1M 上下文窗口：524K 警告，629K 阻止 | `loop.ts:684` |
+| **缓存** | 前缀自动缓存 → 冻结稳定前缀一次计算全会话命中 | `deepseek.ts:42`, `loop.ts:733` |
+| **思考升级** | 错误级联（≥3）或大范围编辑（≥5）→ 自动升级到 32K max thinking | `router.ts:62-70` |
+| **入口** | Flash Triage——一次 Flash 调用替代 4 个关键词分类器 | `agent/flash-triage.ts` |
 | **安全** | 门控溢出：拦截 3 次→强制换策略，5 次→BLOCKED | `loop.ts:1562-1607` |
 | **自学习** | 错误追踪器：重复 2 次→提示搜索解决方案，4 次→承认失败 | `loop.ts:96-123` |
-| **验证** | Flash Judge——独立模型评估完成度（SATISFIED/NOT_SATISFIED/IMPOSSIBLE） | `src/agent/flash-judge.ts` |
-| **证词** | 证词账本——追踪 Agent 承诺 vs 交付，检测循环空头支票 | `flash-judge.ts:196-249` |
+| **验证** | Flash Judge——独立模型评估完成度（SATISFIED/NOT_SATISFIED/IMPOSSIBLE） | `agent/flash-judge.ts` |
+| **证词** | 证词账本——追踪承诺 vs 交付，检测循环空头支票 | `flash-judge.ts:196-249` |
 | **依赖** | Ripple 引擎——TypeScript 感知的级联检测，未解决则阻止写入 | `src/ripple/` |
 | **沙箱** | Job Object（kernel32）+ PathGuard + 环境变量白名单 + 超时 | `src/sandbox/` |
 | **记忆** | CJK bigram+trigram 分词器，思考压实，知识协调 | `src/memory/` |
-| **截断** | 智能 head+tail，错误时保留更多尾部（70% head），无错误 85% head | `loop.ts:1357-1376` |
-| **缓存** | 冻结稳定前缀——首轮计算，全会话复用，保持 Anthropic 前缀缓存 | `loop.ts:733-742` |
 
 → 详见 [ARCHITECTURE.md](./ARCHITECTURE.md)，包含完整 26 门循环解剖和每个系统的深度分析。
 
