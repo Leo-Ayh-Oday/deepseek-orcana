@@ -129,6 +129,7 @@ bun run build        # tsc → dist/
 |---------|------|
 | [OpenCode](https://github.com/anomalyco/opencode) (MIT) | Architecture foundation — MCP bridge, config system, TUI patterns, agent loop |
 | [CodeGraph](https://github.com/colbymchenry/codegraph) (MIT) | MCP-powered code intelligence — symbol search, references, project structure |
+| [Reasonix](https://github.com/esengine/reasonix) (MIT) | Cache-first context compaction — tiered thresholds, frozen prefix, microcompact
 
 See [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) for details.
 
