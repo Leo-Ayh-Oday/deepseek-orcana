@@ -108,7 +108,7 @@ CLI/TUI (Ink React)
 ```bash
 bun install
 bun run typecheck    # tsc --noEmit
-bun test             # 120+ 测试
+bun test             # 运行测试套件
 bun run build        # tsc → dist/
 ```
 

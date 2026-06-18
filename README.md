@@ -108,7 +108,7 @@ Read [ARCHITECTURE.md](./ARCHITECTURE.md) for design decisions, constraints phil
 ```bash
 bun install
 bun run typecheck    # tsc --noEmit
-bun test             # 120+ tests
+bun test             # run test suite
 bun run build        # tsc → dist/
 ```
 
