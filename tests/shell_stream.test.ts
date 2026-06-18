@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import { shellStream } from "../src/tools/shell"
 
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
+}
+
 async function collectShell(params: Record<string, unknown>) {
   const events = []
   for await (const event of shellStream(params)) {
@@ -11,13 +16,19 @@ async function collectShell(params: Record<string, unknown>) {
 
 describe("shellStream", () => {
   test("requires explicit confirmation", async () => {
-    const events = await collectShell({ command: "echo hello" })
-    const done = events.at(-1)
+    const old = process.env.DEEPSEEK_INTERACTIVE
+    process.env.DEEPSEEK_INTERACTIVE = "1"
+    try {
+      const events = await collectShell({ command: "echo hello" })
+      const done = events.at(-1)
 
-    expect(done?.type).toBe("done")
-    if (done?.type === "done") {
-      expect(done.data.success).toBe(false)
-      expect(done.data.content).toContain("confirmation")
+      expect(done?.type).toBe("done")
+      if (done?.type === "done") {
+        expect(done.data.success).toBe(false)
+        expect(done.data.content).toContain("confirmation")
+      }
+    } finally {
+      restoreEnv("DEEPSEEK_INTERACTIVE", old)
     }
   })
 

@@ -4,20 +4,31 @@ import { START_SERVICE_TOOL } from "../src/tools/service"
 
 const startedServers: Array<ReturnType<typeof Bun.serve>> = []
 
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
+}
+
 afterAll(() => {
   for (const server of startedServers) server.stop(true)
 })
 
 describe("start_service tool", () => {
   test("requires confirmation", async () => {
-    const result = await START_SERVICE_TOOL.execute({
-      command: "echo hello",
-      cwd: process.cwd(),
-      url: "http://127.0.0.1:9",
-    })
+    const old = process.env.DEEPSEEK_INTERACTIVE
+    process.env.DEEPSEEK_INTERACTIVE = "1"
+    try {
+      const result = await START_SERVICE_TOOL.execute({
+        command: "echo hello",
+        cwd: process.cwd(),
+        url: "http://127.0.0.1:9",
+      })
 
-    expect(result.success).toBe(false)
-    expect(result.content).toContain("confirmation")
+      expect(result.success).toBe(false)
+      expect(result.content).toContain("confirmation")
+    } finally {
+      restoreEnv("DEEPSEEK_INTERACTIVE", old)
+    }
   })
 
   test("rejects invalid readiness URL", async () => {

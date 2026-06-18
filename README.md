@@ -119,7 +119,7 @@ Read [ARCHITECTURE.md](./ARCHITECTURE.md) for design decisions, constraints phil
 ```bash
 bun install
 bun run typecheck    # tsc --noEmit
-bun test             # run test suite
+bun run test         # run stable test suite
 bun run build        # tsc → dist/
 ```
 
@@ -129,7 +129,7 @@ bun run build        # tsc → dist/
 |---------|------|
 | [OpenCode](https://github.com/anomalyco/opencode) (MIT) | Architecture foundation — MCP bridge, config system, TUI patterns, agent loop |
 | [CodeGraph](https://github.com/colbymchenry/codegraph) (MIT) | MCP-powered code intelligence — symbol search, references, project structure |
-| [Reasonix](https://github.com/esengine/reasonix) (MIT) | Cache-first context compaction — tiered thresholds, frozen prefix, microcompact
+| [Reasonix](https://github.com/esengine/reasonix) (MIT) | Cache-first context compaction — tiered thresholds, frozen prefix, microcompact |
 
 See [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) for details.
 

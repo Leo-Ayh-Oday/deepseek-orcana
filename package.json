@@ -3,6 +3,22 @@
   "version": "0.1.0",
   "description": "Terminal coding agent with model-backed runtime, TUI, and workflow gates.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leo-Ayh-Oday/deepseek-orcana.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Leo-Ayh-Oday/deepseek-orcana/issues"
+  },
+  "homepage": "https://github.com/Leo-Ayh-Oday/deepseek-orcana#readme",
+  "keywords": [
+    "deepseek",
+    "coding-agent",
+    "terminal-ai",
+    "bun",
+    "typescript"
+  ],
   "main": "dist/src/index.js",
   "bin": {
     "orcana": "bin/deepseek-code.cjs",
@@ -22,9 +38,12 @@
     "clean": "node scripts/clean-dist.cjs",
     "build": "bun run clean && tsc -p tsconfig.build.json",
     "prepack": "bun run build",
-    "test": "bun test",
+    "test": "node scripts/run-tests.cjs",
+    "test:all": "bun test",
+    "test:integration": "bun test tests/agent_loop.test.ts tests/e2e_fullstack_flow.test.ts tests/e2e_user_flow.test.ts tests/thinking_depth.test.ts tests/thinking_quality.test.ts",
+    "test:live": "bun test tests/code_as_action.test.ts tests/fullstack_depth.test.ts tests/knowledge_pipeline.test.ts",
     "typecheck": "tsc --noEmit --pretty false",
-    "test:watch": "bun test --watch"
+    "test:watch": "node scripts/run-tests.cjs --watch"
   },
   "engines": {
     "bun": ">=1.3.0",

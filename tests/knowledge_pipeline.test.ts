@@ -8,7 +8,8 @@ import { KnowledgeBase } from "../src/memory/knowledge"
 import type { KeyFact } from "../src/memory/knowledge"
 import { distillAndStore, shouldDistill } from "../src/memory/distiller"
 import { DeepSeekProvider } from "../src/provider/deepseek"
-import { test, expect, afterAll } from "bun:test"
+import { rmSync } from "node:fs"
+import { test, expect } from "bun:test"
 
 const API_KEY = process.env.DEEPSEEK_API_KEY ?? ""
 const skipLiveTests = !API_KEY
@@ -42,9 +43,10 @@ test("知识管道: 6轮递进验证", async () => {
   const tmpDir = `${import.meta.dir}/../.deepseek-code/test-kb-${Date.now()}`
   const kb = new KnowledgeBase(tmpDir)
 
-  console.log("\n" + "=".repeat(60))
-  console.log("统一知识管道验证 — 6轮")
-  console.log("=".repeat(60) + "\n")
+  try {
+    console.log("\n" + "=".repeat(60))
+    console.log("统一知识管道验证 — 6轮")
+    console.log("=".repeat(60) + "\n")
 
   // ── Round 1: 搜索 → 蒸馏到 KB ──
   console.log("[1/6] 搜索蒸馏...")
@@ -119,8 +121,9 @@ test("知识管道: 6轮递进验证", async () => {
   console.log(`  含源URL: ${withSource}`)
   expect(active.length).toBeGreaterThanOrEqual(1)
 
-  console.log("\n✅ 6轮验证全部通过")
-
-  // 清理
-  try { import("node:fs").then(fs => fs.rmSync(tmpDir, { recursive: true, force: true })) } catch {}
+    console.log("\n✅ 6轮验证全部通过")
+  } finally {
+    kb.close()
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
 }, { timeout: 120_000 })

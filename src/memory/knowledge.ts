@@ -277,4 +277,8 @@ export class KnowledgeBase {
     const withSource = this.index.filter(e => e.sourceURL).length
     return { entries: this.index.length, topics: tips.size, withSource }
   }
+
+  close(): void {
+    this.fts.close()
+  }
 }

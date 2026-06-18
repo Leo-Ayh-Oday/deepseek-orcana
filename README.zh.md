@@ -123,7 +123,7 @@ CLI/TUI (Ink React)
 ```bash
 bun install
 bun run typecheck    # tsc --noEmit
-bun test             # 运行测试套件
+bun run test         # 运行稳定测试套件
 bun run build        # tsc → dist/
 ```
 
@@ -133,7 +133,7 @@ bun run build        # tsc → dist/
 |------|------|
 | [OpenCode](https://github.com/anomalyco/opencode) (MIT) | 架构基础 — MCP 桥接、配置系统、TUI 模式、Agent 循环 |
 | [CodeGraph](https://github.com/colbymchenry/codegraph) (MIT) | MCP 代码智能 — 符号搜索、引用查找、项目结构分析 |
-| [Reasonix](https://github.com/esengine/reasonix) (MIT) | 缓存优先上下文压实 — 分层阈值、冻结前缀、微压缩
+| [Reasonix](https://github.com/esengine/reasonix) (MIT) | 缓存优先上下文压实 — 分层阈值、冻结前缀、微压缩 |
 
 详见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)。
 

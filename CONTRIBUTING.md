@@ -6,7 +6,7 @@ Thanks for your interest in contributing! This document outlines the process.
 
 ```bash
 # Clone and install
-git clone https://github.com/YOUR_USERNAME/deepseek-orcana.git
+git clone https://github.com/Leo-Ayh-Oday/deepseek-orcana.git
 cd deepseek-orcana
 bun install
 ```
@@ -18,7 +18,7 @@ bun install
 bun run typecheck
 
 # Run tests
-bun test
+bun run test
 
 # Build
 bun run build
@@ -51,8 +51,10 @@ src/
 
 1. Fork the repo and create a feature branch
 2. Make your changes — keep them focused
-3. Run `bun run typecheck && bun test` — both must pass
+3. Run `bun run typecheck && bun run test` — both must pass
 4. Submit a PR with a clear description
+
+Live/model-evaluation checks are available with `bun run test:live` when you have a configured provider key.
 
 ## Code Style
 
