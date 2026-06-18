@@ -17,16 +17,25 @@ DeepSeek Orcana is a single-agent terminal coding assistant. It reads, writes, a
 
 Built with Bun + TypeScript + Ink (React TUI). Uses DeepSeek's Anthropic-compatible API as the default provider.
 
-## Why Orcana?
+## Highlights
 
-| Feature | What it does |
-|---------|-------------|
-| **Constraint Layer** | State machine + contracts + confidence scoring inline in the main loop |
-| **Flash Judge** | Unified semantic completeness gate (replaces multi-judge sprawl) |
-| **Ripple Engine** | TypeScript-aware code intelligence via compiler API |
-| **Permission Gate** | Three-tier allow/deny rules before any tool executes |
-| **Sandbox** | Path-guard + job-object isolation (Windows native) |
-| **Memory** | SQLite hybrid memory with checkpoint cycles |
+**26 safety mechanisms per round.** Every agent loop iteration passes through a chain of independent gates — context budget, intent, ripple block, permission, rate limiting, quality gate, completion gate, Flash Judge, and more. No single mechanism is trusted alone.
+
+| Layer | Mechanism | Source |
+|-------|-----------|--------|
+| **Entrance** | Flash Triage — one Flash call replaces 4 keyword classifiers | `src/agent/flash-triage.ts` |
+| **Budget** | Context budget: WARN at 50%, BLOCK at 60% | `loop.ts:294-315` |
+| **Safety** | Gate overflow: 3 blocks → strategy switch, 5 → BLOCKED | `loop.ts:1562-1607` |
+| **Learning** | Error tracker: 2 repeated failures → web search prompt, 4 → admit defeat | `loop.ts:96-123` |
+| **Verification** | Flash Judge — independent model evaluates completion (SATISFIED/NOT_SATISFIED/IMPOSSIBLE) | `src/agent/flash-judge.ts` |
+| **Testimony** | Testimony Ledger — tracks agent promises vs delivery, detects circular promises | `flash-judge.ts:196-249` |
+| **Dependency** | Ripple Engine — TypeScript-aware cascade detection, blocks writes until resolved | `src/ripple/` |
+| **Sandbox** | Job Object (kernel32) + PathGuard + env whitelist + timeout | `src/sandbox/` |
+| **Memory** | CJK bigram+trigram tokenizer, thinking compaction, knowledge reconciliation | `src/memory/` |
+| **Truncation** | Smart head+tail with error-aware allocation (70% head on errors, 85% otherwise) | `loop.ts:1357-1376` |
+| **Cache** | Frozen stable prefix — computed once, reused all rounds preserving Anthropic prefix cache | `loop.ts:733-742` |
+
+→ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full 26-gate loop anatomy and deep dives into each system.
 
 ## Quick Start
 
