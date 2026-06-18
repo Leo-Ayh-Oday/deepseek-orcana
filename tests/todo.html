@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>待办事项</title>
+<style>
+  :root {
+    --primary: #2563eb; --primary-hover: #1d4ed8; --accent: #22d3ee;
+    --text: #0f172a; --text-muted: #94a3b8; --border: #e2e8f0;
+    --danger: #ef4444; --danger-hover: #dc2626; --success: #10b981;
+    --bg: #f1f5f9; --surface: #fff; --glass: rgba(255,255,255,.65);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+    --shadow-md: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.06);
+    --shadow-lg: 0 10px 25px rgba(0,0,0,.1), 0 4px 10px rgba(0,0,0,.06);
+    --radius: 12px; --radius-sm: 8px;
+    --ease: cubic-bezier(0.16,1,0.3,1);
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{font-size:16px;-webkit-font-smoothing:antialiased}
+  body{
+    font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background: linear-gradient(135deg,#e0e7ff,#dbeafe 30%,#f0f9ff 70%,#ecfeff);
+    min-height:100vh;display:flex;justify-content:center;padding:2rem 1rem;color:var(--text)
+  }
+  .app{width:100%;max-width:520px;display:flex;flex-direction:column;gap:1.5rem;align-self:flex-start}
+  .header{text-align:center}
+  .header h1{font-size:2.5rem;font-weight:800;letter-spacing:-.025em;
+    background:linear-gradient(135deg,var(--primary),var(--accent));
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+  .header p{font-size:.85rem;color:var(--text-muted);margin-top:.25rem}
+
+  .input-card{
+    background:var(--glass);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    border:1px solid rgba(255,255,255,.6);border-radius:var(--radius);
+    padding:1.25rem;box-shadow:var(--shadow-md);display:flex;gap:.75rem
+  }
+  .input-card input{
+    flex:1;border:1.5px solid var(--border);border-radius:var(--radius-sm);
+    padding:.7rem 1rem;font-size:1rem;outline:none;background:#fff;
+    transition:border-color .2s var(--ease),box-shadow .2s var(--ease)
+  }
+  .input-card input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+  .input-card input::placeholder{color:var(--text-muted)}
+  .input-card button{
+    background:var(--primary);color:#fff;border:none;border-radius:var(--radius-sm);
+    padding:.7rem 1.35rem;font-size:1rem;font-weight:600;cursor:pointer;white-space:nowrap;
+    box-shadow:var(--shadow-sm);
+    transition:background .2s var(--ease),transform .15s var(--ease),box-shadow .2s var(--ease)
+  }
+  .input-card button:hover{background:var(--primary-hover);box-shadow:var(--shadow-md)}
+  .input-card button:active{transform:scale(.96)}
+  .input-card button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+
+  .toolbar{display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:0 .25rem}
+  .toolbar .counts{font-size:.85rem;color:var(--text-muted)}
+  .toolbar .counts b{color:var(--primary)}
+  .toolbar .clear-btn{
+    background:none;border:1px solid var(--border);border-radius:var(--radius-sm);
+    padding:.35rem .75rem;font-size:.8rem;color:var(--text-muted);cursor:pointer;
+    transition:color .2s var(--ease),border-color .2s var(--ease),background .2s var(--ease)
+  }
+  .toolbar .clear-btn:hover{color:var(--danger);border-color:var(--danger);background:#fef2f2}
+  .toolbar .clear-btn:active{transform:scale(.96)}
+  .toolbar .clear-btn:focus-visible{outline:2px solid var(--danger);outline-offset:2px}
+
+  .task-list{list-style:none;display:flex;flex-direction:column;gap:.6rem}
+  .task-list li{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:.9rem 1rem;display:flex;align-items:center;gap:.75rem;
+    box-shadow:var(--shadow-sm);
+    transition:transform .2s var(--ease),box-shadow .2s var(--ease),opacity .25s ease;
+    animation:slideIn .35s var(--ease) both
+  }
+  .task-list li:hover{box-shadow:var(--shadow-lg);transform:translateY(-1px)}
+  .task-list li.removing{opacity:0;transform:translateX(40px) scale(.95);pointer-events:none}
+  @keyframes slideIn{from{opacity:0;transform:translateY(12px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+
+  .task-list input[type=checkbox]{
+    appearance:none;-webkit-appearance:none;width:22px;height:22px;
+    border:2px solid var(--border);border-radius:6px;cursor:pointer;flex-shrink:0;position:relative;
+    transition:border-color .2s var(--ease),background .2s var(--ease)
+  }
+  .task-list input[type=checkbox]:hover{border-color:var(--primary)}
+  .task-list input[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .task-list input[type=checkbox]:checked{background:var(--success);border-color:var(--success)}
+  .task-list input[type=checkbox]:checked::after{
+    content:"✓";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:#fff;font-size:13px;font-weight:700
+  }
+  .task-list .task-text{flex:1;font-size:1rem;word-break:break-word;
+    transition:color .25s var(--ease),text-decoration .25s var(--ease)}
+  .task-list li.done .task-text{color:var(--text-muted);text-decoration:line-through 2px var(--text-muted)}
+  .task-list .del-btn{
+    background:none;border:none;color:#94a3b8;font-size:1.1rem;cursor:pointer;
+    padding:.3rem .5rem;border-radius:6px;line-height:1;flex-shrink:0;
+    transition:color .2s var(--ease),background .2s var(--ease)
+  }
+  .task-list .del-btn:hover{color:var(--danger);background:#fef2f2}
+  .task-list .del-btn:active{transform:scale(.9)}
+  .task-list .del-btn:focus-visible{outline:2px solid var(--danger);outline-offset:2px}
+
+  .empty{text-align:center;padding:3rem 1rem;color:var(--text-muted);
+    background:var(--glass);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    border:1px dashed var(--border);border-radius:var(--radius)}
+  .empty .icon{font-size:2.5rem;margin-bottom:.5rem}
+  .footer{text-align:center;font-size:.8rem;color:var(--text-muted);opacity:.7}
+
+  @media(max-width:768px){body{padding:1.25rem .75rem}.header h1{font-size:2rem}.input-card{padding:1rem;gap:.5rem}.input-card button{padding:.7rem 1rem}}
+  @media(max-width:400px){.header h1{font-size:1.7rem}.input-card{flex-direction:column}}
+  @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:0s!important}.task-list li{animation:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header"><h1>Tasks</h1><p>今日事，今日毕</p></header>
+
+  <div class="input-card">
+    <input type="text" id="taskInput" placeholder="添加新任务…" maxlength="200" autocomplete="off">
+    <button id="addBtn">添加</button>
+  </div>
+
+  <div class="toolbar">
+    <span class="counts">共 <b id="totalCount">0</b> 项，剩下 <b id="remainingCount">0</b> 项</span>
+    <button class="clear-btn" id="clearCompleted" style="display:none">清除已完成</button>
+  </div>
+
+  <ul class="task-list" id="taskList"></ul>
+  <footer class="footer">数据自动保存到本地 · 点击复选框标记完成</footer>
+</div>
+
+<script>
+(function(){
+  var KEY="todo_tasks_v1";
+  var input=document.getElementById("taskInput");
+  var list=document.getElementById("taskList");
+  var totalEl=document.getElementById("totalCount");
+  var remainEl=document.getElementById("remainingCount");
+  var clearBtn=document.getElementById("clearCompleted");
+
+  function load(){try{var r=localStorage.getItem(KEY);return r?JSON.parse(r):[]}catch(e){return[]}}
+  function save(t){localStorage.setItem(KEY,JSON.stringify(t))}
+
+  function esc(s){var d=document.createElement("div");d.appendChild(document.createTextNode(s));return d.innerHTML}
+
+  function render(){
+    var tasks=load();list.innerHTML="";
+    if(!tasks.length){
+      list.innerHTML='<li class="empty"><div class="icon">📝</div><p>还没有任务，添加一个吧</p></li>';
+      clearBtn.style.display="none";
+    }else{
+      var hasDone=false;
+      tasks.forEach(function(t,i){
+        if(t.done)hasDone=true;
+        var li=document.createElement("li");
+        if(t.done)li.className="done";
+        li.innerHTML='<input type="checkbox"'+(t.done?" checked":"")+' data-i="'+i+'">'+
+          '<span class="task-text">'+esc(t.text)+'</span>'+
+          '<button class="del-btn" data-i="'+i+'" title="删除">✕</button>';
+        list.appendChild(li);
+      });
+      clearBtn.style.display=hasDone?"":"none";
+    }
+    var remaining=tasks.filter(function(t){return!t.done}).length;
+    totalEl.textContent=tasks.length;
+    remainEl.textContent=remaining;
+  }
+
+  function add(text){
+    var t=text.trim();if(!t)return false;
+    var tasks=load();tasks.push({text:t,done:false,id:Date.now()});save(tasks);return true
+  }
+  function toggle(i){var tasks=load();if(i>=0&&i<tasks.length){tasks[i].done=!tasks[i].done;save(tasks)}}
+  function remove(i){var tasks=load();if(i>=0&&i<tasks.length){tasks.splice(i,1);save(tasks)}}
+  function clearCompleted(){
+    var tasks=load().filter(function(t){return!t.done});save(tasks);render()
+  }
+
+  document.getElementById("addBtn").addEventListener("click",function(){
+    if(add(input.value)){input.value="";render()}input.focus()
+  });
+  input.addEventListener("keydown",function(e){if(e.key==="Enter"&&add(input.value)){input.value="";render()}});
+
+  clearBtn.addEventListener("click",clearCompleted);
+
+  list.addEventListener("click",function(e){
+    var t=e.target;
+    if(t.tagName==="INPUT"&&t.type==="checkbox"){
+      var i=parseInt(t.getAttribute("data-i"),10);
+      if(!isNaN(i)){toggle(i);render()}
+    }
+    if(t.classList.contains("del-btn")){
+      var i=parseInt(t.getAttribute("data-i"),10);
+      if(!isNaN(i)){
+        var li=t.closest("li");
+        li._delIdx=i;
+        li.classList.add("removing");
+        li.addEventListener("transitionend",function h(){
+          li.removeEventListener("transitionend",h);
+          remove(li._delIdx);render();
+        },{once:true});
+        setTimeout(function(){if(li.parentNode){remove(li._delIdx);render()}},400);
+      }
+    }
+  });
+
+  render();input.focus();
+})();
+</script>
+</body>
+</html>

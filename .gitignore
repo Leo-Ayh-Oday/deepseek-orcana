@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+*.log
+.codegraph/
+.wolf/
+
+# Runtime traces and local agent state
+.deepseek-code/
+
+# Generated app/test output
+.next/
+blog/.next/
+tests/tmp/

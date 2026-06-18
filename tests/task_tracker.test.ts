@@ -1,0 +1,203 @@
+import { describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  createTaskTracker,
+  formatTaskTrackerPrompt,
+  markPlanAccepted,
+  missingTaskRequirements,
+  taskTrackerComplete,
+  updateTaskTrackerAfterTools,
+} from "../src/agent/task-tracker"
+
+function withTempProject(run: (dir: string) => void) {
+  const dir = mkdtempSync(join(tmpdir(), "dscode-quality-"))
+  try {
+    run(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe("TaskTracker", () => {
+  test("creates a full-stack blog checklist", () => {
+    const tracker = createTaskTracker("做一个全栈个人博客，包含前端后端和测试", "long_task")
+
+    expect(tracker).toBeDefined()
+    expect(tracker!.phase).toBe("planning")
+    expect(tracker!.steps.map(step => step.id)).toContain("backend")
+    expect(tracker!.steps.map(step => step.id)).toContain("frontend")
+    expect(tracker!.requiredFiles).toContain("client/src/App.tsx")
+    expect(tracker!.requiredFiles).toContain("client/src/App.css")
+    expect(tracker!.requiredFiles).toContain("server/index.test.ts")
+    expect(tracker!.requiredVerificationKinds).toEqual(["typecheck", "test", "build"])
+    expect(formatTaskTrackerPrompt(tracker!)).toContain("任务追踪模式")
+  })
+
+  test("does not complete until required evidence appears", () => {
+    const tracker = createTaskTracker("Build a complete full-stack personal blog with React and API", "long_task")!
+    markPlanAccepted(tracker)
+    updateTaskTrackerAfterTools({
+      tracker,
+      changedFiles: ["server/index.ts"],
+      toolNames: ["write_file"],
+      typecheckPassed: true,
+    })
+
+    expect(taskTrackerComplete(tracker)).toBe(false)
+    expect(tracker.steps.find(step => step.id === "backend")?.status).toBe("done")
+    expect(tracker.steps.find(step => step.id === "frontend")?.status).not.toBe("done")
+    expect(missingTaskRequirements(tracker).some(item => item.includes("前端"))).toBe(true)
+  })
+
+  test("requires all task-specific verification kinds before completing long tasks", () => {
+    const tracker = createTaskTracker("做一个全栈个人博客，包含前端后端和测试", "long_task")!
+    markPlanAccepted(tracker)
+
+    updateTaskTrackerAfterTools({
+      tracker,
+      changedFiles: [
+        "package.json",
+        "tsconfig.json",
+        "server/index.ts",
+        "server/index.test.ts",
+        "server/posts.json",
+        "client/src/App.tsx",
+        "client/src/App.css",
+      ],
+      toolNames: ["write_file"],
+      typecheckPassed: true,
+    })
+
+    expect(taskTrackerComplete(tracker)).toBe(false)
+    expect(tracker.steps.find(step => step.id === "verification")?.status).not.toBe("done")
+
+    updateTaskTrackerAfterTools({
+      tracker,
+      changedFiles: [],
+      toolNames: ["shell"],
+      verificationResults: [
+        { kind: "test", command: "bun test", passed: true, issues: 0, durationMs: 1, summary: "ok" },
+        { kind: "build", command: "bunx vite build", passed: true, issues: 0, durationMs: 1, summary: "ok" },
+      ],
+    })
+
+    expect(tracker.steps.find(step => step.id === "verification")?.status).toBe("done")
+    expect(taskTrackerComplete(tracker)).toBe(true)
+  })
+
+  test("generic verification boolean does not satisfy concrete quality evidence", () => {
+    const tracker = createTaskTracker("Build a complete full-stack personal blog with React and API", "long_task")!
+    markPlanAccepted(tracker)
+
+    updateTaskTrackerAfterTools({
+      tracker,
+      changedFiles: [],
+      toolNames: ["shell"],
+      verificationPassed: true,
+    })
+
+    expect(tracker.steps.find(step => step.id === "verification")?.status).not.toBe("done")
+    expect(missingTaskRequirements(tracker).some(item => item.includes("typecheck"))).toBe(true)
+    expect(missingTaskRequirements(tracker).some(item => item.includes("test"))).toBe(true)
+    expect(missingTaskRequirements(tracker).some(item => item.includes("build"))).toBe(true)
+  })
+
+  test("frontend design gate blocks bare functional demos", () => {
+    withTempProject((dir) => {
+      const tracker = createTaskTracker("Build a React Vite frontend page", "long_task")!
+      markPlanAccepted(tracker)
+      mkdirSync(join(dir, "client", "src"), { recursive: true })
+      writeFileSync(join(dir, "package.json"), "{}")
+      writeFileSync(join(dir, "tsconfig.json"), "{}")
+      writeFileSync(join(dir, "client", "src", "App.tsx"), "export default function App(){return <ul><li>Hello</li></ul>}")
+      writeFileSync(join(dir, "client", "src", "App.css"), ".container{max-width:720px;margin:0 auto}")
+
+      updateTaskTrackerAfterTools({
+        tracker,
+        changedFiles: ["client/src/App.tsx", "client/src/App.css"],
+        toolNames: ["write_file"],
+        verificationPassed: true,
+      })
+
+      const missing = missingTaskRequirements(tracker, dir)
+      expect(missing.some(item => item.includes("前端设计不足"))).toBe(true)
+    })
+  })
+
+  test("frontend design gate accepts a designed responsive surface", () => {
+    withTempProject((dir) => {
+      const tracker = createTaskTracker("Build a React Vite frontend page", "long_task")!
+      markPlanAccepted(tracker)
+      mkdirSync(join(dir, "client", "src"), { recursive: true })
+      writeFileSync(join(dir, "package.json"), "{}")
+      writeFileSync(join(dir, "tsconfig.json"), "{}")
+      writeFileSync(join(dir, "client", "src", "App.tsx"), [
+        "export default function App(){",
+        "return <main><nav className='topbar'>Brand</nav><section className='hero'><img src='https://example.com/cover.jpg' /></section><section className='featured'>Story</section><article className='reader'>Text</article></main>",
+        "}",
+      ].join("\n"))
+      writeFileSync(join(dir, "client", "src", "App.css"), [
+        ".topbar{display:flex}.hero{display:grid;grid-template-columns:1fr 1fr}.hero img{width:100%;height:420px;object-fit:cover}.featured{display:flex}.reader{max-width:760px}",
+        "@media (max-width:800px){.hero{grid-template-columns:1fr}}",
+        ".archive{display:grid}.visual{background:url(https://example.com/cover.jpg)}",
+        ".story{color:#1e1b18;background:#fffaf2;border:1px solid rgba(0,0,0,.1);padding:24px;margin:12px;}".repeat(40),
+      ].join("\n"))
+
+      updateTaskTrackerAfterTools({
+        tracker,
+        changedFiles: ["client/src/App.tsx", "client/src/App.css"],
+        toolNames: ["write_file"],
+        verificationPassed: true,
+      })
+
+      const missing = missingTaskRequirements(tracker, dir)
+      expect(missing.some(item => item.includes("前端设计不足"))).toBe(false)
+    })
+  })
+
+  test("backend quality gate blocks shallow API implementations", () => {
+    withTempProject((dir) => {
+      const tracker = createTaskTracker("Build a backend API server with tests", "long_task")!
+      markPlanAccepted(tracker)
+      mkdirSync(join(dir, "server"), { recursive: true })
+      writeFileSync(join(dir, "package.json"), "{}")
+      writeFileSync(join(dir, "tsconfig.json"), "{}")
+      writeFileSync(join(dir, "server", "index.ts"), "export function getPosts(){return []}")
+      writeFileSync(join(dir, "server", "index.test.ts"), "test('works',()=>expect(true).toBe(true))")
+
+      updateTaskTrackerAfterTools({
+        tracker,
+        changedFiles: ["server/index.ts", "server/index.test.ts"],
+        toolNames: ["write_file"],
+        verificationPassed: true,
+      })
+
+      const missing = missingTaskRequirements(tracker, dir)
+      expect(missing.some(item => item.includes("后端质量不足"))).toBe(true)
+    })
+  })
+
+  test("backend quality gate accepts API tests with service lifecycle and error paths", () => {
+    withTempProject((dir) => {
+      const tracker = createTaskTracker("Build a backend API server with tests", "long_task")!
+      markPlanAccepted(tracker)
+      mkdirSync(join(dir, "server"), { recursive: true })
+      writeFileSync(join(dir, "package.json"), "{}")
+      writeFileSync(join(dir, "tsconfig.json"), "{}")
+      writeFileSync(join(dir, "server", "index.ts"), "export const server={stop(){},port:3099}; export function json(){ return new Response('{}',{status:404,headers:{'Content-Type':'application/json','Access-Control-Allow-Origin':'*'}})}")
+      writeFileSync(join(dir, "server", "index.test.ts"), "describe('api',()=>{let server:any;beforeAll(()=>{server={stop(){}}});afterAll(()=>server.stop());it('404',async()=>{const r=await fetch('http://localhost:3099/missing');expect([404,200]).toContain(r.status)})})")
+
+      updateTaskTrackerAfterTools({
+        tracker,
+        changedFiles: ["server/index.ts", "server/index.test.ts"],
+        toolNames: ["write_file"],
+        verificationPassed: true,
+      })
+
+      const missing = missingTaskRequirements(tracker, dir)
+      expect(missing.some(item => item.includes("后端质量不足"))).toBe(false)
+    })
+  })
+})

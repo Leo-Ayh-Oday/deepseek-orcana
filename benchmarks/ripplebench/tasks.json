@@ -1,0 +1,125 @@
+{
+  "name": "RippleBench Pro",
+  "version": "1.0",
+  "description": "8 SWE-Pro-level tasks testing DeepSeek Code's ripple engine, Flash Triage, type-system reasoning, and web-search integration.",
+  "codebase": "Type-safe Event Pipeline — 5 source files, complex generics, middleware chains, retry logic",
+  "tasks": [
+    {
+      "id": "rbp-01",
+      "title": "Generic type parameter propagation through 5 files",
+      "category": "type-system-escalation",
+      "difficulty": "hard",
+      "description": "Add a new generic type parameter `TMeta extends Record<string, unknown> = Record<string, never>` to `PipelineContext`, then propagate it through `Handler<T, TMeta>`, `Middleware<C, TMeta>`, `EventBus<TMeta>`, and `BatchProcessor<TMeta>`. The middleware `process` signature and `createMiddlewareChain` must be updated. All 5 source files compile with zero errors. The existing tests continue to pass with the default `TMeta` parameter.",
+      "filesToChange": ["src/types.ts", "src/middleware.ts", "src/event-bus.ts", "src/batch-processor.ts", "src/index.ts"],
+      "rippleCheck": "Every file that imports `PipelineContext`, `Handler`, `Middleware`, or `EventBus` must have its generic parameters updated",
+      "verification": "tsc --noEmit && bun test tests/event-pipeline.test.ts",
+      "expectedScore": 70
+    },
+    {
+      "id": "rbp-02",
+      "title": "String union to discriminated union migration",
+      "category": "type-system-escalation",
+      "difficulty": "very-hard",
+      "description": "Replace `EventType` (string union) and `EventPayload` (single shape) with 6 discriminated union variants: `UserCreatedEvent`, `UserUpdatedEvent`, `OrderPlacedEvent`, `OrderCancelledEvent`, `PaymentReceivedEvent`, `PaymentFailedEvent`. Each variant has a typed `payload` field. `Handler` must use the discriminated union so that `event.payload` is narrowed in each handler. All existing tests still pass. The `createValidateMiddleware` should validate against the new type.",
+      "filesToChange": ["src/types.ts", "src/event-bus.ts", "src/middleware.ts", "src/batch-processor.ts", "src/index.ts"],
+      "rippleCheck": "EventBus.emit(), Handler signature, validate middleware — all must narrow to the new discriminated union",
+      "verification": "tsc --noEmit && bun test tests/event-pipeline.test.ts",
+      "expectedScore": 55
+    },
+    {
+      "id": "rbp-03",
+      "title": "Async handler migration — sync to Promise",
+      "category": "ripple-cascade",
+      "difficulty": "hard",
+      "description": "Change `Handler<T>` to return `Promise<T | null>` (async). This forces ALL call sites to add `await`: `EventBus.emit()` returns `Promise<EventPayload[]>`, `BatchProcessor.processOne()` must `await handler()`, `createMiddlewareChain` must accept async handlers, middleware `next()` returns `Promise<EventPayload | null>`. Tests must `await bus.emit()` and handle the async chain.",
+      "filesToChange": ["src/types.ts", "src/event-bus.ts", "src/batch-processor.ts", "src/middleware.ts", "tests/event-pipeline.test.ts"],
+      "rippleCheck": "Every caller of `Handler`, `EventBus.emit()`, and `createMiddlewareChain` must be updated with `await`. Ripple must detect async-return-change for Handler.",
+      "verification": "tsc --noEmit && bun test tests/event-pipeline.test.ts",
+      "expectedScore": 65
+    },
+    {
+      "id": "rbp-04",
+      "title": "RetryPolicy interface refactor with backoff strategies",
+      "category": "ripple-cascade",
+      "difficulty": "hard",
+      "description": "Replace `RetryPolicy`'s flat `maxRetries` + `backoffMs` fields with a `RetryStrategy` interface: `interface RetryStrategy { getDelay(attempt: number): number; shouldRetry(event: EventPayload, attempt: number, error: Error): boolean }`. Provide two implementations: `ConstantBackoff(ms)` and `ExponentialBackoff(baseMs, maxMs)`. Update `RetryPolicy` to use `RetryStrategy`. Update `BatchProcessor` to use the strategy interface. `DEFAULT_RETRY` becomes `ConstantBackoff(100)`. All consumers of `RetryPolicy` must be updated.",
+      "filesToChange": ["src/types.ts", "src/batch-processor.ts"],
+      "rippleCheck": "Every import of `RetryPolicy.maxRetries` or `RetryPolicy.backoffMs` must be replaced with strategy calls.",
+      "verification": "tsc --noEmit && bun test tests/event-pipeline.test.ts",
+      "expectedScore": 70
+    },
+    {
+      "id": "rbp-05",
+      "title": "Extract shared pipeline executor from EventBus and BatchProcessor",
+      "category": "architecture-refactor",
+      "difficulty": "very-hard",
+      "description": "`EventBus.emit()` and `BatchProcessor.processOne()` both contain duplicate inline logic for: middleware chain construction, context creation, error wrapping. Extract a `PipelineExecutor` class that encapsulates: context creation, middleware chain execution, error handling. Refactor both `EventBus` and `BatchProcessor` to use `PipelineExecutor`. The public API of both classes must not change. All existing tests pass unchanged.",
+      "filesToChange": ["src/types.ts", "src/event-bus.ts", "src/batch-processor.ts", "src/index.ts"],
+      "requiresNewFile": "src/pipeline-executor.ts",
+      "rippleCheck": "EventBus and BatchProcessor must delegate to PipelineExecutor. Ripple should detect that the new file is imported correctly by both consumers.",
+      "verification": "tsc --noEmit && bun test tests/event-pipeline.test.ts",
+      "expectedScore": 50
+    },
+    {
+      "id": "rbp-06",
+      "title": "Pluggable ErrorStrategy protocol",
+      "category": "architecture-refactor",
+      "difficulty": "hard",
+      "description": "Replace `defaultErrorHandler` (a standalone function) with a proper `ErrorStrategy` interface: `interface ErrorStrategy { handleError(entry: ErrorEntry): ErrorAction; onDeadLetter(event: EventPayload): void }`. Provide two implementations: `RetryThenDLQ(maxRetries)` and `FailFast`. Inject `ErrorStrategy` into `EventBus` and `BatchProcessor` via constructor. The `ErrorStrategy` must be optional (default to `RetryThenDLQ(3)`). Remove `defaultErrorHandler` from the barrel export.",
+      "filesToChange": ["src/types.ts", "src/event-bus.ts", "src/batch-processor.ts", "src/index.ts"],
+      "rippleCheck": "Every call to `defaultErrorHandler()` must be replaced with `errorStrategy.handleError()`. Ripple must detect the removed export.",
+      "verification": "tsc --noEmit && bun test tests/event-pipeline.test.ts",
+      "expectedScore": 65
+    },
+    {
+      "id": "rbp-07",
+      "title": "BREAKING: Delete EventBus.emit() without updating callers",
+      "category": "breaking-should-block",
+      "difficulty": "medium",
+      "description": "Delete the `EventBus.emit()` method. Do NOT update any callers. The agent should either: (a) refuse to delete it, citing the callers, or (b) cascade-update all callers before deletion. If the agent deletes `emit()` without updating callers, the test fails (tsc error).",
+      "filesToChange": ["src/event-bus.ts"],
+      "rippleCheck": "Ripple MUST block this change — `emit()` is called in tests/event-pipeline.test.ts (5 callers) and is a public API method.",
+      "verification": "tsc --noEmit (must pass — meaning ripple blocked the deletion OR all callers were updated)",
+      "isNegativeTest": true,
+      "expectedScore": 85
+    },
+    {
+      "id": "rbp-08",
+      "title": "BREAKING: Change Handler contravariance without consumer updates",
+      "category": "breaking-should-block",
+      "difficulty": "hard",
+      "description": "Change `Handler<T>` from `(event: T, ctx: PipelineContext) => T | null` to `(ctx: PipelineContext, event: T) => T | null` — swapping parameter order. This is a signature change that breaks every handler in the codebase. Do NOT update any handler implementations. Ripple MUST detect the signature change and block. If it doesn't, tsc will report 10+ errors.",
+      "filesToChange": ["src/types.ts"],
+      "rippleCheck": "Every handler function uses (event, ctx) parameter order. Swapping to (ctx, event) breaks all of them. Ripple must detect signature-change and block.",
+      "isNegativeTest": true,
+      "verification": "If ripple blocked → tests still pass with original code. If ripple didn't block → tsc errors.",
+      "expectedScore": 85
+    },
+    {
+      "id": "rbp-09",
+      "title": "WEB SEARCH: Migrate to Bun.test v2 API",
+      "category": "web-search",
+      "difficulty": "hard",
+      "requiresWebSearch": true,
+      "searchHint": "Bun test describe expect API changes 2025 2026 latest version",
+      "description": "The test file uses Bun test API (`describe`, `test`, `expect`). Search the web for the latest Bun test API changes (2025-2026). If Bun has introduced a new test runner API or changed the imports, update the test file accordingly. The task codebase currently imports from 'bun:test'. Verify by running `bun test tests/` — all 11 tests must pass with the updated API.",
+      "filesToChange": ["tests/event-pipeline.test.ts"],
+      "rippleCheck": "N/A — test file only change",
+      "verification": "bun test tests/",
+      "expectedScore": 75
+    },
+    {
+      "id": "rbp-10",
+      "title": "WEB SEARCH: Add exponential backoff with jitter from production practices",
+      "category": "web-search",
+      "difficulty": "very-hard",
+      "requiresWebSearch": true,
+      "searchHint": "exponential backoff jitter best practices AWS Google Cloud retry strategy",
+      "description": "The current `BatchProcessor` uses simple linear backoff (`backoffMs * attempt`). Search the web for production retry best practices (AWS, Google Cloud, Stripe engineering blogs). Implement a jittered exponential backoff strategy based on industry standards. The new strategy must be the DEFAULT. Update `RetryPolicy` and `BatchProcessor` accordingly. Existing tests must pass. Add a new test verifying the backoff timing characteristics.",
+      "filesToChange": ["src/types.ts", "src/batch-processor.ts", "tests/event-pipeline.test.ts"],
+      "rippleCheck": "RetryPolicy changes must propagate to BatchProcessor and any tests that hardcode maxRetries/backoffMs.",
+      "verification": "tsc --noEmit && bun test tests/",
+      "expectedScore": 45
+    }
+  ]
+}
