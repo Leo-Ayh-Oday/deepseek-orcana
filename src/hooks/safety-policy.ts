@@ -123,6 +123,7 @@ export function createSafetyPolicyHook(options: SafetyPolicyOptions = {}): HookH
       const dangerousPrefixes = [
         "c:\\windows\\", "c:\\windows\\system32\\", "c:\\program files\\",
         "c:\\program files (x86)\\", "c:\\programdata\\",
+        "/system/", "/etc/", "/boot/", "/sys/", "/proc/",
       ]
       if (dangerousPrefixes.some(p => normalized.startsWith(p))) {
         return { blocked: true, warn: `Safety policy blocked dangerous path: ${path}` }
