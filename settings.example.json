@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "_comment": "Copy this file to ~/.deepseek-code/settings.json and customize. All fields are optional — defaults are used when omitted.",
+
+  "provider": {
+    "baseUrl": "https://api.deepseek.com/anthropic",
+    "apiKey": "${DEEPSEEK_API_KEY}",
+    "modelOverride": null,
+    "costMode": "normal",
+    "idleTimeoutMs": 60000
+  },
+
+  "mcp": {
+    "servers": {
+      "codegraph": {
+        "command": "codegraph",
+        "args": ["serve"],
+        "enabled": true,
+        "timeout": 30000
+      },
+      "context7": {
+        "command": "npx",
+        "args": ["-y", "@upstash/context7-mcp"],
+        "enabled": false,
+        "timeout": 30000
+      }
+    }
+  },
+
+  "permissions": {
+    "rules": [
+      {
+        "toolName": "Bash",
+        "paramKey": "command",
+        "paramPattern": "rm\\s+-rf\\s+/",
+        "level": "deny",
+        "reason": "Block destructive recursive delete on root"
+      },
+      {
+        "toolName": "Write",
+        "pathPattern": "**/.env",
+        "level": "deny",
+        "reason": "Block writes to .env files"
+      }
+    ],
+    "categoryOverrides": {}
+  },
+
+  "tui": {
+    "splash": true,
+    "theme": "dark",
+    "maxHistory": 100
+  },
+
+  "memory": {
+    "checkpointThresholdTokens": 50000,
+    "compactionEnabled": true,
+    "knowledgeBaseEnabled": true
+  },
+
+  "sandbox": {
+    "enabled": true,
+    "blockedPaths": [
+      "C:\\Windows",
+      "C:\\Program Files",
+      "/System",
+      "/etc"
+    ]
+  },
+
+  "loop": {
+    "maxSteps": 100,
+    "autoContinue": false,
+    "planModeDefault": false
+  }
+}
