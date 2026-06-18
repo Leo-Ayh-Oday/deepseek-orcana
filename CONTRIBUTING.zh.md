@@ -6,8 +6,8 @@
 
 ```bash
 # 克隆并安装
-git clone https://github.com/Leo-Ayh-Oday/wine-pack-erp.git
-cd deepseek-code   # 如果从 monorepo 根目录克隆
+git clone https://github.com/YOUR_USERNAME/deepseek-orcana.git
+cd deepseek-orcana
 bun install
 ```
 

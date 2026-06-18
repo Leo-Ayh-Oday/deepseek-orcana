@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-**Do not open a public issue.** Email the maintainer directly with details.
+**Do not open a public issue.** Send details to the project maintainer via GitHub Security Advisory or the repository's private vulnerability reporting channel.
 
 ## Supported Versions
 

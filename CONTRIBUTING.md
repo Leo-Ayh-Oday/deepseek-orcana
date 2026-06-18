@@ -6,8 +6,8 @@ Thanks for your interest in contributing! This document outlines the process.
 
 ```bash
 # Clone and install
-git clone https://github.com/Leo-Ayh-Oday/wine-pack-erp.git  # or your fork
-cd deepseek-code   # if cloned from monorepo root
+git clone https://github.com/YOUR_USERNAME/deepseek-orcana.git
+cd deepseek-orcana
 bun install
 ```
 
@@ -61,6 +61,15 @@ src/
 - Prefer `interface` over `type` for object shapes
 - Single-task modules over god-files
 - Constraints inline in the loop, not in standalone modules
+
+## Design Principles
+
+> Every design decision answers one question: **"Does this make it harder for AI to write bad code?"**
+
+- Infrastructure can be borrowed (provider/MCP/LSP/session), core architecture should not
+- Single agent is the default mode, multi-agent is not
+- "Discussion" and "execution" are strictly separated
+- Constraints that work are hardwired into `loop.ts` — modules defined but not wired in have zero effect
 
 ## Reporting Bugs
 
