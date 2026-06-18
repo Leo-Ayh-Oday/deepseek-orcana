@@ -30,9 +30,9 @@ All effective constraints are **inline in `loop.ts`**, not in standalone modules
 - **Contracts**: Tool output must satisfy schema assertions before next step
 - **Confidence Scoring**: Multi-axis evaluation (3 concurrent scorers) gates file writes
 
-### 2. Single Agent by Default
+### 2. Single Agent
 
-Multi-agent orchestration is available via `--autonomous` for long-running tasks, but the default mode is a single agent with deep context. This avoids the coordination tax and keeps latency low for interactive use.
+Orcana is strictly single-agent. A MetaAgent supervisor (`src/agent/meta-agent.ts`) exists but is not yet wired into the main loop.
 
 ### 3. Intent Gate: Discuss ≠ Execute
 
@@ -75,7 +75,7 @@ A TypeScript-aware code intelligence layer that:
 - Parses project structure via `tsconfig.json`
 - Resolves imports and symbol references
 - Provides structured diagnostics
-- Enforces `tsc --noEmit` before allowing file writes
+- Blocks file writes on ripple-detected structural issues
 
 ## Benchmark: RippleBench Pro
 
