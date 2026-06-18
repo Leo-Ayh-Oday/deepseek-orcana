@@ -124,18 +124,14 @@ bun test             # 运行测试套件
 bun run build        # tsc → dist/
 ```
 
-## 灵感来源
+## 基于
 
-Orcana 借鉴了以下开源项目的设计思路：
+| 项目 | 角色 |
+|------|------|
+| [OpenCode](https://github.com/anomalyco/opencode) (MIT) | 架构基础 — MCP 桥接、配置系统、TUI 模式、Agent 循环 |
+| [CodeGraph](https://github.com/colbymchenry/codegraph) (MIT) | MCP 代码智能 — 符号搜索、引用查找、项目结构分析 |
 
-| 项目 | 借鉴内容 |
-|------|----------|
-| [OpenCode](https://github.com/anomalyco/opencode) (MIT) | MCP 桥接、配置系统、TUI 模式 |
-| [MiMo Code](https://github.com/XiaoMi/mimo-code) (MIT) | 记忆系统、检查点模板、智能截断 |
-| [Claude Code](https://claude.ai/code) | Hook 系统、权限 UX |
-| [Aider](https://github.com/Aider-AI/aider) | Map-reduce 编辑 |
-
-完整列表见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)。
+详见 [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md)。
 
 ## 协议
 

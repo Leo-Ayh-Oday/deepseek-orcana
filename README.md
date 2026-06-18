@@ -120,18 +120,14 @@ bun test             # run test suite
 bun run build        # tsc → dist/
 ```
 
-## Inspired By
+## Built On
 
-Orcana builds on ideas from these open-source projects:
+| Project | Role |
+|---------|------|
+| [OpenCode](https://github.com/anomalyco/opencode) (MIT) | Architecture foundation — MCP bridge, config system, TUI patterns, agent loop |
+| [CodeGraph](https://github.com/colbymchenry/codegraph) (MIT) | MCP-powered code intelligence — symbol search, references, project structure |
 
-| Project | What We Learned |
-|---------|----------------|
-| [OpenCode](https://github.com/anomalyco/opencode) (MIT) | MCP bridge, config system, TUI patterns |
-| [MiMo Code](https://github.com/XiaoMi/mimo-code) (MIT) | Memory system, checkpoint templates, truncation |
-| [Claude Code](https://claude.ai/code) | Hook system, permission UX |
-| [Aider](https://github.com/Aider-AI/aider) | Map-reduce editing |
-
-See [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) for the full list with links.
+See [ACKNOWLEDGMENTS.md](./ACKNOWLEDGMENTS.md) for details.
 
 ## License
 

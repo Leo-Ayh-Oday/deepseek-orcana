@@ -1,53 +1,27 @@
 # Acknowledgments
 
-DeepSeek Orcana builds on ideas, patterns, and code from these excellent open-source projects.
+DeepSeek Orcana builds on ideas and patterns from these open-source projects.
 
-## Direct Inspirations (MIT License)
+## [OpenCode](https://github.com/anomalyco/opencode) — MIT
 
-### [OpenCode](https://github.com/anomalyco/opencode) — MIT
-The pioneering open-source AI coding agent by [Anomaly Co](https://anomalyco.com). OpenCode established the TUI-driven coding agent paradigm that many projects (including this one) build upon.
+The pioneering open-source AI coding agent by [Anomaly Co](https://anomalyco.com). OpenCode established the TUI-driven coding agent paradigm that Orcana builds upon.
 
-**What we learned:**
-- MCP bridge architecture for tool registry
-- Multi-provider config system (`config.ts` with Zod schema)
+**What we adopted:**
+- MCP bridge architecture for dynamic tool registration
+- Multi-provider config system with Zod schema validation
 - TUI component patterns (React Ink-based terminal UI)
-- Permission system design (allow/deny rules with path patterns)
+- Permission system design (allow/deny rules with path-pattern matching)
 - Agent loop structure with step gating
 
-### [MiMo Code](https://github.com/XiaoMi/mimo-code) — MIT *(Xiaomi Corporation)*
-A terminal-native AI coding assistant with cross-session memory, built on OpenCode's foundation.
+## [CodeGraph](https://github.com/colbymchenry/codegraph) — MIT
 
-**What we learned:**
-- Cross-session persistent memory via SQLite FTS5
-- Structured checkpoint templates (6-segment format)
-- Smart context truncation (head + tail + error-aware)
-- Memory cycle coordination (reconcile)
-- Provider normalization layer
+Local-first code intelligence MCP server by Colby McHenry. Indexes codebases into a SQLite-backed knowledge graph using tree-sitter, exposes structural search and impact analysis tools to AI agents.
 
-## Infrastructure & Tooling
+Orcana integrates CodeGraph via MCP for symbol search, reference lookup, and project structure analysis — reducing token usage and tool calls compared to raw file-system traversal.
 
-| Project | License | Usage |
-|---------|---------|-------|
-| [Ink](https://github.com/vadimdemedes/ink) | MIT | Terminal UI framework (React for CLI) |
-| [Bun](https://github.com/oven-sh/bun) | MIT | JavaScript runtime, bundler, test runner |
-| [TypeScript](https://github.com/microsoft/TypeScript) | Apache 2.0 | Compiler API for ripple engine |
-| [Hono](https://github.com/honojs/hono) | MIT | Embedded HTTP server for API endpoints |
-| [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-typescript) | MIT | Provider communication layer |
+## License
 
-## Design Philosophy Influences
-
-These projects shaped our thinking even when we didn't adopt their code directly:
-
-| Project | Key Idea |
-|---------|----------|
-| [Claude Code](https://claude.ai/code) | Hook system, permission model, settings.json UX |
-| [Aider](https://github.com/Aider-AI/aider) | Map-reduce editing, edit-block format |
-| [Cline](https://github.com/cline/cline) | VSCode-integrated agent loop with human-in-the-loop |
-| [SWE-Agent](https://github.com/princeton-nlp/SWE-Agent) | Agent-Computer Interface (ACI) design |
-
-## License Compatibility
-
-All directly referenced code is under MIT (or MIT-compatible) licenses. See [LICENSE](./LICENSE) for this project's terms.
+All referenced projects use MIT (or MIT-compatible) licenses. See [LICENSE](./LICENSE) for this project's terms.
 
 ---
 
