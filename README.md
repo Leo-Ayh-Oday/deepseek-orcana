@@ -3,6 +3,10 @@
 <p align="center"><strong>A Bun-based terminal coding agent with constraint-first architecture and DeepSeek-powered runtime.</strong></p>
 
 <p align="center">
+  <a href="./README.zh.md">中文</a> | English
+</p>
+
+<p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen.svg" alt="Contributions welcome"></a>
 </p>
