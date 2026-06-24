@@ -9,10 +9,6 @@ import type { StagedContextManager } from "../context/staged"
 import type { ThinkingStore } from "../memory/thinking-store"
 import type { KnowledgeBase } from "../memory/knowledge"
 import { distillAndStore, shouldDistill } from "../memory/distiller"
-import { execSync } from "node:child_process"
-import { existsSync } from "node:fs"
-import { resolve } from "node:path"
-import { selectTools } from "./tool-disclosure"
 import { buildContextKernel } from "../context/kernel"
 import { classifyIntent } from "./intent"
 import { FlashTriage, triageModeToIntent, triageToTaskIntent, buildTrackerFromTriage, activateSkillNamesByKeywords, resolveFlashTriagePolicy, shouldUseFlashTriage } from "./flash-triage"
@@ -22,19 +18,18 @@ import { mergeProviderTokenUsage } from "../provider/usage"
 import { setRuntimeContextBudgetMode } from "./runtime-context"
 import type { RippleReport } from "../ripple/types"
 import { mergeObligations, normalizeProjectPath, obligationsFromReport, resolveObligations, type RippleObligation } from "../ripple/obligations"
-import { formatRippleExitGateCallers, setCascadeFiles } from "../ripple/engine"
-import { buildCacheAnatomy } from "../context/cache-anatomy"
+import { setCascadeFiles } from "../ripple/engine"
 import type { ModelRouter } from "../provider/router"
 import { ConfidenceEvaluator } from "../evaluator/confidence"
-import type { ObjectiveSignals } from "../evaluator/types"
-import { validateContracts } from "./contracts"
 import { AgentState, StateMachine } from "./state-machine"
-import type { AgentContext } from "./state-machine"
+import { compactAssistantContext } from "./round/helpers"
+import { runPostEditDiagnostics, runRippleVerification, collectThinkingRounds, isRecord, collectRecentTurns, mcThreshold, extractPromises, microcompactToolResults, compactHistoricalToolResults, updateStateMachine, type StateMachineInput } from "./round/post-loop"
+import { ErrorTracker, withToolTimeout, nextProviderEvent, providerIdleTimeoutMs, runToolBeforeHook, runToolAfterHook, appendHookWarnings, executeToolWithHooks, buildVolatileContextMessage, collectResearchEvidence, containsTypecheckFailure, countTypecheckIssues, isVerificationUnavailable, isRuntimeProjectRoot, isRuntimeSourceFile, rootRuntimeVerificationPassed, formatRuntimeSelfEditGate, normalizeExplicitFile, explicitRequiredFiles, missingExplicitRequiredFiles } from "./round/pre-loop"
 import type { HookSystem } from "../hooks"
 import { formatSkippedProviderPurpose, shouldSkipProviderPurpose } from "../provider/cost-policy"
 import { formatToolLedgerStatus, ToolExecutionLedger } from "./tool-ledger"
 import { runTypeScriptNoEmit } from "../tools/typescript"
-import { getLSPClient } from "../lsp/client"
+
 import { formatServiceTestGuidance, hasServiceTestFailure, type VerificationResult } from "../verification/result"
 import type { AgentRunTrace } from "./run-trace"
 import {
@@ -45,7 +40,6 @@ import {
   markPlanAccepted,
   missingTaskRequirements,
   snapshotTaskTracker,
-  taskTrackerComplete,
   updateTaskTrackerAfterTools,
 } from "./task-tracker"
 import { buildEffectivePrompt, buildModelClarificationCall, evaluateClarificationNeed, formatModelClarificationFailure, parseModelClarification } from "./clarification"
@@ -58,12 +52,17 @@ import { formatGenericProviderStreamBlockedReport, formatGenericProviderStreamRe
 import { buildResearchEvidenceContext, buildResearchInsufficientEvidenceMessage, type ResearchEvidence } from "./research-answer"
 import { classifyResearchRoute, shouldRunResearch } from "./research-router"
 import { FlashJudge, TestimonyLedger } from "./flash-judge"
-import { inferToolCategory, PermissionGate } from "./permission"
+import { PermissionGate } from "./permission"
 import { loadUserConfig, loadProjectConfig } from "./permission-config"
-import type { ToolCategory } from "./permission"
+import { evaluateToolPolicy } from "./tool-execution/policy"
+import { GateTelemetry } from "./gates/telemetry"
 import { SandboxManager } from "../sandbox/sandbox"
 import { setShellSandbox } from "../tools/shell"
 import { saveCheckpoint, adaptiveCheckpointThreshold, shouldSkipCheckpointThisRound, recordCheckpointTaken, formatCheckpointSummary, type ComplexityMetrics } from "../session/checkpoint"
+import { buildContextMessages, buildRoundProviderRequest, cacheStableProviderTools, estimateRoundTokens } from "./round/request-builder"
+import { createPreRoundChain } from "./gates/pre-round"
+import { createCompletionChain } from "./gates/completion"
+import { processGateOverflow } from "./gates/overflow"
 
 export interface UsageStats {
   apiCalls: number
@@ -92,391 +91,10 @@ export interface AgentOptions {
   autoApprovePlan?: boolean
   /** Optional: model router for sub-purpose model selection (compaction/semantic-recall etc.) */
   modelRouter?: ModelRouter
-}
-
-// ── Self-learning error tracker ──
-
-interface ErrorRecord { toolName: string; errorContent: string; count: number }
-
-class ErrorTracker {
-  private errors = new Map<string, ErrorRecord>()
-  private triggered = new Set<string>()
-
-  record(name: string, content: string): string | null {
-    if (!/[ef]ail|[ef]rr|blocked|not found|denied/i.test(content)) return null
-    const key = name + ":" + content.slice(0, 80).replace(/[^a-zA-Z0-9一-鿿]/g, "")
-    const rec = this.errors.get(key)
-    if (rec) {
-      rec.count++
-      if (rec.count === 2 && !this.triggered.has(key)) {
-        this.triggered.add(key)
-        return `\n[系统提示] 工具 "${name}" 重复失败。请用 web_search 搜索此错误并学习正确用法:\n  "${content.slice(0, 200)}"\n不要用同样的参数重试。搜索完把解决方案总结存入知识库。\n`
-      }
-      if (rec.count >= 4 && !this.triggered.has(key + "_skip")) {
-        this.triggered.add(key + "_skip")
-        return `\n[系统提示] "${name}" 已失败 ${rec.count} 次。放弃当前方案，向用户承认遇到了困难并解释已尝试的方法。\n`
-      }
-    } else {
-      this.errors.set(key, { toolName: name, errorContent: content.slice(0, 200), count: 1 })
-    }
-    return null
-  }
-}
-
-const TOOL_TIMEOUT_SLOW = 180_000  // shell, test, build commands — can legitimately be slow
-const TOOL_TIMEOUT_DEFAULT = 60_000  // file ops, search, codegraph, etc.
-
-const SLOW_TOOLS = new Set(["shell", "multi_edit", "edit_file", "edit_fim"])
-
-async function withToolTimeout<T>(name: string, work: Promise<T>, timeoutMs?: number): Promise<T> {
-  const effectiveTimeout = timeoutMs ?? (SLOW_TOOLS.has(name) ? TOOL_TIMEOUT_SLOW : TOOL_TIMEOUT_DEFAULT)
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Tool '${name}' timed out after ${effectiveTimeout / 1000}s`)), effectiveTimeout)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
-async function nextProviderEvent(
-  iterator: AsyncIterator<StreamEvent>,
-  timeoutMs: number,
-): Promise<IteratorResult<StreamEvent>> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      iterator.next(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`provider stream idle timeout after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
-function providerIdleTimeoutMs(): number {
-  const raw = Number(process.env.DEEPSEEK_PROVIDER_IDLE_TIMEOUT_MS)
-  return Number.isFinite(raw) && raw > 0 ? raw : 180_000
-}
-
-function blockedByHookResult(tool: string, reason?: string): ToolResult {
-  const message = reason?.trim() || `Tool '${tool}' blocked by runtime hook`
-  return { success: false, content: `[blocked] ${message}`, error: message, metadata: { blocked: true, hookBlocked: true } }
-}
-
-function normalizeHookResult(result: { success: boolean; content: string }, previous?: ToolResult): ToolResult {
-  if (result.success) return { success: true, content: result.content, metadata: previous?.metadata }
-  return {
-    success: false,
-    content: result.content,
-    error: result.content,
-    metadata: previous?.metadata,
-  }
-}
-
-async function runToolBeforeHook(
-  hooks: HookSystem | undefined,
-  tool: string,
-  params: Record<string, unknown>,
-): Promise<{ blocked?: ToolResult; warnings: string[] }> {
-  if (!hooks) return { warnings: [] }
-  const output = await hooks.runBefore(tool, params)
-  const warnings = output.warn ? [output.warn] : []
-  if (output.blocked) return { blocked: blockedByHookResult(tool, output.warn), warnings: [] }
-  return { warnings }
-}
-
-async function runToolAfterHook(
-  hooks: HookSystem | undefined,
-  tool: string,
-  params: Record<string, unknown>,
-  result: ToolResult,
-): Promise<{ result: ToolResult; warnings: string[] }> {
-  if (!hooks) return { result, warnings: [] }
-  const output = await hooks.runAfter(tool, params, { success: result.success, content: result.content })
-  const warnings = output.warn ? [output.warn] : []
-  return { result: output.result ? normalizeHookResult(output.result, result) : result, warnings }
-}
-
-function appendHookWarnings(result: ToolResult, warnings: string[]): ToolResult {
-  if (warnings.length === 0) return result
-  const content = `${result.content}\n\n[hook warning] ${warnings.join("\n[hook warning] ")}`
-  if (result.success) return { ...result, content }
-  return { ...result, content, error: result.error }
-}
-
-async function executeToolWithHooks(input: {
-  hooks?: HookSystem
-  tool: ToolDescriptor
-  params: Record<string, unknown>
-  execute: () => Promise<ToolResult>
-}): Promise<ToolResult> {
-  const before = await runToolBeforeHook(input.hooks, input.tool.defn.name, input.params)
-  if (before.blocked) return appendHookWarnings(before.blocked, before.warnings)
-
-  const rawResult = await input.execute()
-  const after = await runToolAfterHook(input.hooks, input.tool.defn.name, input.params, rawResult)
-  return appendHookWarnings(after.result, [...before.warnings, ...after.warnings])
-}
-
-function buildVolatileContextMessage(ctxText: string, thinkContext: string, knowledgeContext: string): ProviderMessage | null {
-  const chunks: string[] = []
-  if (ctxText.trim()) chunks.push(`## Loaded Context\n${ctxText.trim()}`)
-  if (thinkContext.trim()) chunks.push(`## Similar Thinking Notes\n${thinkContext.trim()}`)
-  if (knowledgeContext.trim()) chunks.push(`## Learned Knowledge\n${knowledgeContext.trim()}`)
-  if (chunks.length === 0) return null
-
-  return {
-    role: "user",
-    content: [
-      "## Volatile Round Context",
-      "Use this as temporary context for the current request. Do not treat it as a new user request.",
-      chunks.join("\n\n"),
-    ].join("\n\n"),
-  }
-}
-
-function buildContextBudgetMessage(mode: ContextBudgetMode, percent: number): ProviderMessage | null {
-  if (mode !== "degraded") return null
-  return {
-    role: "user",
-    content: [
-      "## Context Budget Guard",
-      `The current request is using about ${percent}% of the model context window.`,
-      "Continue only the current atomic stage. Do not expand scope, do not start broad exploration, and do not introduce new optional work.",
-      "If the next step would require a large new search, many new files, or a multi-stage rewrite, stop after the current checkpoint and ask for compaction or a fresh continuation.",
-    ].join("\n"),
-  }
-}
-
-async function collectResearchEvidence(input: {
-  tools: ToolDescriptor[]
-  queries: string[]
-  hooks?: HookSystem
-}): Promise<ResearchEvidence[]> {
-  const webSearch = input.tools.find(tool => tool.defn.name === "web_search")
-  if (!webSearch) {
-    return input.queries.slice(0, 3).map(query => ({
-      query,
-      success: false,
-      content: "web_search tool is not available.",
-    }))
-  }
-
-  const evidence: ResearchEvidence[] = []
-  for (const query of input.queries.slice(0, 3)) {
-    try {
-      const result = await executeToolWithHooks({
-        hooks: input.hooks,
-        tool: webSearch,
-        params: { query },
-        execute: () => withToolTimeout("web_search", webSearch.execute({ query }), 12_000),
-      })
-      evidence.push({ query, success: result.success, content: result.content })
-    } catch (e) {
-      evidence.push({ query, success: false, content: e instanceof Error ? e.message : String(e) })
-    }
-  }
-  return evidence
-}
-
-function stableToolSet(tools: ToolDescriptor[], readonlyOnly: boolean): ToolDescriptor[] {
-  return readonlyOnly ? tools.filter(tool => tool.defn.isReadonly) : tools
-}
-
-type ContextBudgetMode = "normal" | "degraded" | "block"
-
-function envRatio(name: string, fallback: number): number {
-  const raw = Number(process.env[name])
-  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : fallback
-}
-
-function contextBudgetMode(currentInputTokens: number, contextMax: number): { mode: ContextBudgetMode; percent: number } {
-  const warnRatio = envRatio("DEEPSEEK_CONTEXT_WARN_RATIO", 0.5)
-  const blockRatio = envRatio("DEEPSEEK_CONTEXT_BLOCK_RATIO", 0.6)
-  const ratio = currentInputTokens / contextMax
-  const percent = Math.round(ratio * 100)
-  if (ratio >= blockRatio) return { mode: "block", percent }
-  if (ratio >= warnRatio) return { mode: "degraded", percent }
-  return { mode: "normal", percent }
-}
-
-function contextSafeToolSet(tools: ToolDescriptor[], mode: ContextBudgetMode): ToolDescriptor[] {
-  // Degraded mode is a soft gate: finish the current atomic stage, but avoid
-  // broad new exploration. Hard blocking happens only in "block" mode before
-  // the provider is called.
-  void mode
-  return tools
-}
-
-function containsTypecheckFailure(text: string): boolean {
-  return /\berror TS\d+|\btypecheck\b.*\b(fail|failed|error)|\[diagnostics\]|\[tsc unavailable\]/i.test(text)
-}
-
-function countTypecheckIssues(text: string): number {
-  const matches = text.match(/\berror TS\d+/g)
-  if (matches?.length) return matches.length
-  return containsTypecheckFailure(text) ? 1 : 0
-}
-
-function isVerificationUnavailable(text: string): boolean {
-  return /\[tsc unavailable\]|not recognized|command not found|failed to spawn/i.test(text)
-}
-
-function strongestRippleDecision(reports: RippleReport[], pending: RippleObligation[]): "allow" | "warn" | "block" | undefined {
-  if (pending.length > 0) return "warn"
-  if (reports.some(report => report.decision === "block")) return "block"
-  if (reports.some(report => report.decision === "warn")) return "warn"
-  if (reports.length > 0) return "allow"
-  return undefined
-}
-
-function applyRippleToolFilter(
-  tools: ToolDescriptor[],
-  reports: RippleReport[],
-  pending: RippleObligation[],
-): { tools: ToolDescriptor[]; blocked: boolean } {
-  const decision = strongestRippleDecision(reports, pending)
-  if (decision === "block") {
-    return { tools: tools.filter(t => t.defn.isReadonly), blocked: true }
-  }
-  return { tools, blocked: false }
-}
-
-function isRuntimeProjectRoot(cwd = process.cwd()): boolean {
-  return existsSync(resolve(cwd, "src/agent/loop.ts")) &&
-    existsSync(resolve(cwd, "src/provider/deepseek.ts")) &&
-    existsSync(resolve(cwd, "package.json"))
-}
-
-function isRuntimeSourceFile(path: string, cwd = process.cwd()): boolean {
-  if (!isRuntimeProjectRoot(cwd)) return false
-  const normalized = normalizeProjectPath(path)
-  return (
-    normalized.startsWith("src/agent/") ||
-    normalized.startsWith("src/tools/") ||
-    normalized.startsWith("src/ui/") ||
-    normalized.startsWith("src/provider/") ||
-    normalized.startsWith("src/memory/") ||
-    normalized.startsWith("src/context/") ||
-    normalized.startsWith("src/hooks/") ||
-    normalized.startsWith("src/verification/") ||
-    normalized.startsWith("tests/")
-  )
-}
-
-function rootRuntimeVerificationPassed(results: VerificationResult[]): boolean {
-  return results.some(result => {
-    if (!result.passed || result.kind !== "typecheck") return false
-    const command = result.command.replace(/\\/g, "/").toLowerCase()
-    return !/\bcd\s+blog\b|\/blog\b|blog\//.test(command)
-  })
-}
-
-function formatRuntimeSelfEditGate(files: string[]): string {
-  return [
-    "## Runtime Self-Edit Gate",
-    "You changed DeepSeek Code runtime source files in the currently running process.",
-    "The current Node process cannot use those source changes until the CLI is restarted.",
-    "",
-    "Required next step:",
-    "1. Run exactly one root project typecheck command, for example: `bun run typecheck` or `npx tsc --noEmit --pretty false` from the deepseek-code root.",
-    "2. If it passes, stop and tell the user to restart DeepSeek Code.",
-    "3. Do not inspect unrelated files, do not keep debugging the old in-memory behavior, and do not claim the running process has picked up the fix.",
-    "",
-    "Changed runtime files:",
-    ...files.slice(0, 12).map(file => `- ${file}`),
-  ].join("\n")
-}
-
-function buildAgentContractContext(input: {
-  round: number
-  priorTools: string[]
-  priorFiles: Set<string>
-  toolErrors: number
-  modifiedFiles: number
-}): AgentContext {
-  const wrote = input.modifiedFiles > 0 || input.priorTools.some(tool => tool === "write_file" || tool === "edit_file" || tool === "edit_fim" || tool === "multi_edit")
-  const currentState = input.toolErrors > 0 ? AgentState.REPAIR : wrote ? AgentState.VERIFY : AgentState.DONE
-  return {
-    state: currentState,
-    roundNum: input.round,
-    priorTools: input.priorTools,
-    priorFiles: new Set(input.priorFiles),
-    errorCount: input.toolErrors,
-    consecutiveErrors: input.toolErrors,
-    toolResults: new Map(),
-  }
-}
-
-function formatQualityGatePrompt(input: {
-  confidence: ReturnType<ConfidenceEvaluator["evaluateSync"]>
-  contractMessages: string[]
-  signals: ObjectiveSignals
-}): string {
-  const lines = [
-    "## Runtime Quality Gate",
-    "You cannot finish yet. The runtime quality gate found unresolved objective risks.",
-    `Confidence recommendation: ${input.confidence.recommendation} (${Math.round(input.confidence.confidence * 100)}%).`,
-  ]
-  if (input.signals.typecheck && !input.signals.typecheck.passed) {
-    lines.push(`Typecheck/diagnostics: failed with ${input.signals.typecheck.issues} issue(s).`)
-  }
-  if (typeof input.signals.toolErrors === "number" && input.signals.toolErrors > 0) {
-    lines.push(`Tool errors this task: ${input.signals.toolErrors}.`)
-  }
-  if (input.signals.rippleDecision && input.signals.rippleDecision !== "allow") {
-    lines.push(`Ripple decision: ${input.signals.rippleDecision}.`)
-  }
-  for (const message of input.contractMessages.slice(0, 5)) {
-    lines.push(`Contract: ${message}`)
-  }
-  lines.push("")
-  lines.push("Required next step: inspect the failing objective signal, repair or verify it with tools, then provide a concise completion only after the gate can pass.")
-  return lines.join("\n")
-}
-
-function compactAssistantContext(text: string, maxChars = 1200): string {
-  const trimmed = text.trim()
-  if (trimmed.length <= maxChars) return trimmed
-  const lines = trimmed.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
-  const head = lines.slice(0, 8).join("\n")
-  const compact = head.length > maxChars ? head.slice(0, maxChars) : head
-  return `${compact}\n[assistant output compacted from ${trimmed.length} chars]`
-}
-
-function normalizeExplicitFile(path: string): string {
-  return normalizeProjectPath(path)
-    .replace(/^\.\/+/, "")
-    .replace(/[),.;:]+$/g, "")
-}
-
-function explicitRequiredFiles(prompt: string): string[] {
-  const files = new Set<string>()
-  const patterns = [
-    /\b(?:add|create|write|include)\b[^.\n\r]{0,120}?\b([A-Za-z0-9_./\\-]+(?:\.test|\.spec)\.(?:ts|tsx|js|jsx|mjs|cjs))\b/gi,
-    /(?:添加|创建|新建|写入|编写)[^。\n\r]{0,120}?([A-Za-z0-9_./\\-]+(?:\.test|\.spec)\.(?:ts|tsx|js|jsx|mjs|cjs))/gi,
-  ]
-  for (const pattern of patterns) {
-    for (const match of prompt.matchAll(pattern)) {
-      const file = match[1] ? normalizeExplicitFile(match[1]) : ""
-      if (file) files.add(file)
-    }
-  }
-  return [...files]
-}
-
-function missingExplicitRequiredFiles(prompt: string, modifiedFiles: Set<string>, cwd = process.cwd()): string[] {
-  return explicitRequiredFiles(prompt).filter(file => {
-    if (modifiedFiles.has(file)) return false
-    return !existsSync(resolve(cwd, file))
-  })
+  /** Optional: gate telemetry collector for the 3-step validation plan. */
+  gateTelemetry?: GateTelemetry
+  /** Optional: file path to auto-save telemetry on agent exit. */
+  gateTelemetryFile?: string
 }
 
 export async function* agentLoop(
@@ -501,6 +119,26 @@ export async function* agentLoop(
   const state = createState()
   const cacheTracker = new CacheTracker()
   const errorTracker = new ErrorTracker()
+  const gateTelemetry = options.gateTelemetry ?? new GateTelemetry()
+
+  // ── Load accumulated telemetry from previous runs (additive merge) ──
+  if (!options.gateTelemetry && options.gateTelemetryFile) {
+    const prev = await GateTelemetry.loadFromFile(options.gateTelemetryFile).catch(() => new GateTelemetry())
+    gateTelemetry.merge(prev)
+  }
+
+  // ── Helper: save telemetry to disk (called at all exit points) ──
+  const flushTelemetry = async () => {
+    if (gateTelemetry.gateNames().length === 0) return
+    if (!options.gateTelemetryFile) return
+    // Ensure parent directory exists
+    const path = await import("node:path")
+    const fs = await import("node:fs/promises")
+    const dir = path.dirname(options.gateTelemetryFile)
+    await fs.mkdir(dir, { recursive: true }).catch(() => {})
+    await gateTelemetry.saveToFile(options.gateTelemetryFile).catch(() => {})
+  }
+
   const contextKernel = buildContextKernel(process.cwd())
 
   // ── Flash Triage: semantic task classification (replaces 4 keyword classifiers) ──
@@ -650,6 +288,7 @@ export async function* agentLoop(
       reason: clarification.reason,
       source: structuredClarification ? "model_structured" : "model_failed",
     })
+    await flushTelemetry()
     return
   }
 
@@ -756,14 +395,13 @@ export async function* agentLoop(
     // message inserted between an assistant(tool_use) and user(tool_result)
     // is a 400 error. So volatile/planning/budget context must precede
     // rawMessages, never follow it.
-    const langContextMsg: ProviderMessage = { role: "user", content: langInstruction }
-    const contextMessages: ProviderMessage[] = [
-      langContextMsg,
-      ...(stablePrefixContext ? [stablePrefixContext] : []),
-      ...(researchContext ? [researchContext] : []),
-      ...(volatileContext ? [volatileContext] : []),
-      ...(planningContext ? [planningContext] : []),
-    ]
+    const contextMessages = buildContextMessages({
+      langInstruction,
+      stablePrefixContext,
+      researchContext,
+      volatileContext,
+      planningContext,
+    })
     if (!announcedKernel) {
       announcedKernel = true
       yield { type: "status", data: `context-kernel: ${contextKernel.hash} (~${contextKernel.estimatedTokens} tokens)` }
@@ -781,55 +419,66 @@ export async function* agentLoop(
     })
 
     usage.apiCalls++
-    let roundInputTokens = Math.round((system.length + contextMessages.reduce((s, m) => s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0) + rawMessages.reduce((s, m) => s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0)) / 3)
-    const contextBudget = contextBudgetMode(roundInputTokens, CONTEXT_MAX)
-    setRuntimeContextBudgetMode(contextBudget.mode)
-    const budgetContext = buildContextBudgetMessage(contextBudget.mode, contextBudget.percent)
-    if (budgetContext) contextMessages.push(budgetContext)
-    const providerMessages = [
-      ...contextMessages,
-      ...rawMessages,
-    ]
-    if (budgetContext) {
-      roundInputTokens = Math.round((system.length + providerMessages.reduce((s, m) => s + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0)) / 3)
+
+    // ── Pre-round gate chain: context budget → tool disclosure → readonly/plan → ripple filter ──
+    const preTokens = estimateRoundTokens(system, contextMessages, rawMessages, null)
+    const contextText = preTokens.providerMessages.map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n").slice(-4000) + "\n" + system
+    const preRoundCtx = {
+      round,
+      roundInputTokens: preTokens.roundInputTokens,
+      contextMax: CONTEXT_MAX,
+      fullTools: tools,
+      tools,
+      rippleReports: lastRippleReports,
+      pendingRippleObligations,
+      intentReadonly: intentPolicy.mode === "readonly",
+      taskPlanning: Boolean(taskPlanning),
+      cacheStableTools,
+      disclosureContextText: contextText,
+      contextBudgetMode: "normal" as const,
+      contextBudgetPercent: 0,
+      budgetMessage: null as ProviderMessage | null,
+      announcedDegraded: announcedContextDegraded,
+      rippleBlockActive: false,
+      tokensSaved: 0,
+      activeTools: tools,
     }
+    const preRoundChain = createPreRoundChain()
+    const preRoundResult = preRoundChain.evaluateSync(preRoundCtx, gateTelemetry)
+
+    setRuntimeContextBudgetMode(preRoundCtx.contextBudgetMode)
+    const budgetContext = preRoundCtx.budgetMessage
+    const { roundInputTokens, providerMessages } = estimateRoundTokens(
+      system, contextMessages, rawMessages, budgetContext,
+    )
     const estimatedRoundInputTokens = roundInputTokens
     usage.estimatedInputTokens += roundInputTokens
     contextInputTotal += roundInputTokens
 
-    if (contextBudget.mode === "block") {
-      yield { type: "status", data: `context-budget: block ${contextBudget.percent}%` }
-      options.runTrace?.record("gate_decision", { gate: "context_budget", decision: "block", percent: contextBudget.percent })
-      yield { type: "text", data: `Context budget exceeded (${contextBudget.percent}%). Compact or start a fresh continuation before more tool use.` }
+    if (!preRoundResult.pass) {
+      // Context budget block — hard exit
+      yield { type: "status", data: `context-budget: block ${preRoundCtx.contextBudgetPercent}%` }
+      options.runTrace?.record("gate_decision", { gate: "context_budget", decision: "block", percent: preRoundCtx.contextBudgetPercent })
+      yield { type: "text", data: preRoundResult.message ?? "Context budget exceeded." }
       break
     }
-    if (contextBudget.mode === "degraded" && !announcedContextDegraded) {
+    if ((preRoundCtx.contextBudgetMode as string) === "degraded" && !announcedContextDegraded) {
       announcedContextDegraded = true
-      yield { type: "status", data: `context-budget: degraded ${contextBudget.percent}%; finish current stage only` }
+      yield { type: "status", data: `context-budget: degraded ${preRoundCtx.contextBudgetPercent}%; finish current stage only` }
     }
 
-    // Dynamic tool disclosure: filter tools by conversation context
-    const contextText = providerMessages.map(m => typeof m.content === "string" ? m.content : JSON.stringify(m.content)).join("\n").slice(-4000) + "\n" + system
-    const { selected, tokensSaved } = selectTools(tools, contextText, round)
-    const planOnlyRound = Boolean(taskPlanning && round > 0)
-    const rippleFilter = applyRippleToolFilter(
-      intentPolicy.mode === "readonly" || taskPlanning
-        ? selected.filter(tool => tool.defn.isReadonly)
-        : selected,
-      lastRippleReports,
-      pendingRippleObligations,
-    )
-    rippleBlockActive = rippleFilter.blocked
+    // Apply ripple block side effects
+    rippleBlockActive = preRoundCtx.rippleBlockActive
     if (rippleBlockActive) {
       for (const report of lastRippleReports) sandbox.blockFileWrite(report.targetFile)
     }
-    const activeTools = planOnlyRound
-      ? []
-      : cacheStableTools
-      ? stableToolSet(tools, intentPolicy.mode === "readonly" || taskPlanning || rippleBlockActive)
-      : rippleFilter.tools
-    if (!cacheStableTools && tokensSaved > 0) {
-      yield { type: "status", data: `tools: ${activeTools.length}/${tools.length} (↓${tokensSaved} tokens)` }
+
+    const activeTools = cacheStableTools
+      ? cacheStableProviderTools(tools)
+      : preRoundCtx.activeTools
+
+    if (!cacheStableTools && preRoundCtx.tokensSaved > 0) {
+      yield { type: "status", data: `tools: ${activeTools.length}/${tools.length} (↓${preRoundCtx.tokensSaved} tokens)` }
     }
     if (round === 0 && intentPolicy.mode === "readonly") {
       yield { type: "status", data: `intent-gate: readonly (${intentPolicy.reason})` }
@@ -842,24 +491,27 @@ export async function* agentLoop(
       if (status) yield { type: "status", data: status }
       yield { type: "task_progress", data: snapshotTaskTracker(taskTracker) }
     }
-    if (planOnlyRound) {
+    if (preRoundCtx.taskPlanning && round > 0) {
       yield { type: "status", data: "任务追踪: 规划阶段只输出计划" }
     }
     if (rippleBlockActive) {
       yield { type: "status", data: `涟漪阻止: 写工具已禁用 (${pendingRippleObligations.length} 个调用方未更新)` }
       options.runTrace?.record("gate_decision", { gate: "ripple_block", decision: "block", pending: pendingRippleObligations.length })
     }
-    const budgetedTools = contextSafeToolSet(activeTools, contextBudget.mode)
-    const toolSchemas = budgetedTools.map(t => t.toAnthropicSchema())
-    const providerToolSchemas = toolSchemas.slice(0, 128)
-    const cacheAnatomy = buildCacheAnatomy({ system, tools: providerToolSchemas, messages: providerMessages, thinkingTokens: thinkingTokenTotal, contextMax: CONTEXT_MAX })
-    const cacheShape = cacheTracker.checkPrefixShape([
-      { kind: "model", value: modelName },
-      { kind: "system", value: system },
-      { kind: "tools", value: providerToolSchemas },
-      { kind: "messages", value: providerMessages },
-    ])
-    const cacheStatus = cacheShape.status
+    const roundRequest = buildRoundProviderRequest({
+      modelName,
+      system,
+      providerMessages,
+      tools: activeTools,
+      cacheTracker,
+      thinkingTokenTotal,
+      contextInputTotal,
+      contextOutputTotal,
+      contextMax: CONTEXT_MAX,
+      round,
+      contextUsagePercent: preRoundCtx.contextBudgetPercent,
+    })
+    const { providerToolSchemas, cacheAnatomy, cacheShape, cacheStatus, estimatedUsageEvent } = roundRequest
     if (cacheStatus === "hit") { usage.cacheHits++ } else { usage.cacheMisses++ }
     options.runTrace?.record("cache_prefix_shape", {
       round,
@@ -868,7 +520,6 @@ export async function* agentLoop(
       firstChangedSection: cacheShape.firstChangedSection,
       sections: cacheShape.sections,
     })
-    const estimatedUsageEvent = { requestedModel: modelName, inputTokens: contextInputTotal, outputTokens: contextOutputTotal, contextMax: CONTEXT_MAX, round, cacheHitRate: cacheShape.hitRate, cacheStatus, cacheSource: "estimate", cachePrefixShape: { firstChangedSection: cacheShape.firstChangedSection, sections: cacheShape.sections }, contextUsagePercent: contextBudget.percent, cacheAnatomy }
     options.runTrace?.record("token_usage", estimatedUsageEvent)
     yield { type: "token_usage", data: estimatedUsageEvent }
     yield { type: "status", data: thinking ? thinkingDecision.visibleStatus : "working" }
@@ -943,7 +594,7 @@ export async function* agentLoop(
         cacheMissInputTokens: providerUsage?.cacheMissInputTokens,
         cacheCreationInputTokens: providerUsage?.cacheCreationInputTokens,
         cachePrefixShape: { firstChangedSection: cacheShape.firstChangedSection, sections: cacheShape.sections },
-        contextUsagePercent: contextBudget.percent,
+        contextUsagePercent: preRoundCtx.contextBudgetPercent,
         cacheAnatomy,
     }
     options.runTrace?.record("token_usage", finalUsageEvent)
@@ -1008,130 +659,87 @@ export async function* agentLoop(
     }
 
     if (completedToolCalls.length === 0 && finalText) {
-      // Flash Judge handles semantic completion evaluation.
-      // No regex-based output/evidence gates — model + judge cover this.
-
-      if (intentPolicy.mode !== "readonly" && pendingRippleObligations.length > 0 && round + 1 < maxRounds) {
-        rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-        rawMessages.push({ role: "user", content: formatRippleExitGateCallers(pendingRippleObligations.map(o => ({ caller: o.caller, symbol: o.symbol }))) })
-        yield { type: "status", data: `ripple-exit-gate: pending ${pendingRippleObligations.length}` }
-        continue
+      // ── Completion gate chain: ripple exit → planning → task tracker → quality ──
+      const completionCtx = {
+        round,
+        finalText,
+        intentPolicy,
+        taskTracker,
+        pendingRippleObligations,
+        taskHadWrite,
+        taskToolErrors,
+        taskModifiedFiles,
+        lastTypecheck,
+        lastRippleReports,
+        lastVerificationResults,
+        planApproved,
+        planningRejections,
+        maxRounds,
+        priorTools: lastToolNames,
+        priorFiles: taskFiles,
+        confidenceEvaluator,
+        completionBlockMessage: null as string | null,
+        shouldBreak: false,
+        breakEvent: null as { type: string; data: unknown } | null,
+        statusMessage: "",
+        injectMessages: [] as Array<{ role: string; content: string }>,
+        traceEvent: null as { gate: string; decision: string; [key: string]: unknown } | null,
       }
+      const completionChain = createCompletionChain()
+      const completionResult = completionChain.evaluateSync(completionCtx, gateTelemetry)
 
-      if (taskTracker && taskTracker.phase === "planning" && round + 1 < maxRounds) {
-        // User already confirmed → skip gate, enter execution directly
-        if (planApproved) {
-          markPlanAccepted(taskTracker)
-          rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-          rawMessages.push({ role: "user", content: formatTaskTrackerPrompt(taskTracker) })
-          yield { type: "status", data: "任务追踪: 用户已确认规划，进入执行阶段" }
+      if (!completionResult.pass) {
+        // Inject messages and yield status
+        for (const msg of completionCtx.injectMessages) {
+          rawMessages.push(msg as ProviderMessage)
+        }
+        if (completionCtx.statusMessage) {
+          yield { type: "status", data: completionCtx.statusMessage }
+        }
+        if (completionCtx.traceEvent) {
+          options.runTrace?.record("gate_decision", completionCtx.traceEvent)
+        }
+
+        // Handle planning-specific state mutations
+        const ctxExtra = completionCtx as unknown as Record<string, unknown>
+        if (ctxExtra._planningRejected) {
+          planningRejections++
+          continue
+        }
+        if (ctxExtra._planningPassed) {
+          planningRejections = 0
+          // Plan ready — yield plan_ready event and break for user approval
+          if (completionCtx.shouldBreak && completionCtx.breakEvent && !options.autoApprovePlan) {
+            yield completionCtx.breakEvent as { type: "plan_ready"; data: unknown }
+            break
+          }
+          // Auto-approve: mark accepted and continue
+          if (completionCtx.breakEvent?.type === "plan_ready") {
+            markPlanAccepted(taskTracker!)
+            rawMessages.push({ role: "user", content: formatTaskTrackerPrompt(taskTracker!) })
+            yield { type: "status", data: "任务追踪: 规划完成，进入执行阶段" }
+            options.runTrace?.record("gate_decision", {
+              gate: "planning",
+              decision: "accepted",
+              score: ctxExtra._planningScore as number,
+              signals: ctxExtra._planningSignals,
+            })
+            continue
+          }
+        }
+        // Plan approved (user confirmed)
+        if (completionResult.reason === "planning_accepted") {
           planApproved = false
           planningRejections = 0
           continue
         }
-        const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
-        rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-        if (!planningGate.ok && !forcePlanningPassAfterLimit(planningRejections)) {
-          planningRejections++
-          rawMessages.push({ role: "user", content: formatPlanningGatePrompt(planningGate, taskTracker) })
-          yield { type: "status", data: `planning-gate: revise plan (${planningGate.missing.length} missing)` }
-          options.runTrace?.record("gate_decision", {
-            gate: "planning",
-            decision: "revise",
-            missing: planningGate.missing,
-            score: planningGate.score,
-          })
+        // Ripple exit, task tracker, quality — all "continue"
+        if (completionResult.reason === "ripple_exit" || completionResult.reason === "task_tracker" || completionResult.reason === "quality") {
           continue
         }
-        if (planningGate.ok) {
-          planningRejections = 0
-        } else {
-          // force-pass after limit: gate not ok but we let it through anyway
-          yield { type: "status", data: `planning-gate: force-pass after ${planningRejections} rejections` }
-        }
-        // Plan passed evaluation but needs user approval
-        if (!planApproved && !options.autoApprovePlan) {
-          yield {
-            type: "plan_ready",
-            data: {
-              planText: finalText.slice(0, 3000),
-              score: planningGate.score,
-              signals: planningGate.signals,
-              goal: taskTracker.goal,
-              steps: taskTracker.steps.map(s => ({ id: s.id, title: s.title })),
-              requiredFiles: taskTracker.requiredFiles,
-              requiredVerificationKinds: taskTracker.requiredVerificationKinds,
-              missingItems: planningGate.missing,
-            },
-          }
-          yield { type: "status", data: "plan-mode: awaiting user approval" }
-          break  // stop generator; CLI re-invokes agentLoop with approval/revision
-        }
-        markPlanAccepted(taskTracker)
-        rawMessages.push({ role: "user", content: formatTaskTrackerPrompt(taskTracker) })
-        yield { type: "status", data: "任务追踪: 规划完成，进入执行阶段" }
-        planApproved = false  // reset for any future replanning
-        options.runTrace?.record("gate_decision", {
-          gate: "planning",
-          decision: "accepted",
-          score: planningGate.score,
-          signals: planningGate.signals,
-        })
-        continue
       }
 
       const missingLongTask = missingTaskRequirements(taskTracker)
-      if (taskTracker && !taskTrackerComplete(taskTracker) && missingLongTask.length > 0 && round + 1 < maxRounds) {
-        rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-        rawMessages.push({ role: "user", content: [
-          "## 任务追踪未完成",
-          "你现在不能结束。下面这些项目仍然没有完成：",
-          ...missingLongTask.slice(0, 12).map(item => `- ${item}`),
-          "",
-          "请继续执行第一个未完成项。不要输出最终总结，除非清单全部完成并完成验证。",
-        ].join("\n") })
-        yield { type: "status", data: `任务追踪: 仍有 ${missingLongTask.length} 项未完成，继续执行` }
-        continue
-      }
-
-      if (intentPolicy.mode !== "readonly" && (taskHadWrite || taskToolErrors > 0)) {
-        const rippleDecision = strongestRippleDecision(lastRippleReports, pendingRippleObligations)
-        const latestTest = [...lastVerificationResults].reverse().find(result => result.kind === "test")
-        const signals: ObjectiveSignals = {
-          testResults: latestTest ? {
-            passed: latestTest.passed ? 1 : 0,
-            failed: latestTest.passed ? 0 : Math.max(1, latestTest.issues),
-            total: latestTest.passed ? 1 : Math.max(1, latestTest.issues),
-            output: latestTest.summary,
-          } : undefined,
-          typecheck: lastTypecheck,
-          rippleDecision,
-          toolErrors: taskToolErrors,
-          filesChanged: taskModifiedFiles,
-        }
-        const confidence = confidenceEvaluator.evaluateSync(signals)
-        const contractResult = validateContracts(buildAgentContractContext({
-          round,
-          priorTools: lastToolNames,
-          priorFiles: taskFiles,
-          toolErrors: taskToolErrors,
-          modifiedFiles: taskModifiedFiles,
-        }), AgentState.DONE)
-        const contractMessages = contractResult.violations.map(violation => violation.message)
-        const shouldContinueForQuality =
-          round + 1 < maxRounds &&
-          (
-            confidence.recommendation === "retry" ||
-            contractResult.fatal.length > 0 ||
-            Boolean(lastTypecheck && !lastTypecheck.passed)
-          )
-        if (shouldContinueForQuality) {
-          rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-          rawMessages.push({ role: "user", content: formatQualityGatePrompt({ confidence, contractMessages, signals }) })
-          yield { type: "status", data: `quality-gate: ${confidence.recommendation} ${Math.round(confidence.confidence * 100)}%` }
-          continue
-        }
-      }
 
       if (needsExternalCompletionGate({ taskTracker, taskHadWrite, toolErrors: taskToolErrors })) {
         const completionReport = evaluateCompletionGate({
@@ -1280,55 +888,54 @@ export async function* agentLoop(
       let resultObj: { success: boolean; content: string; metadata?: Record<string, unknown> } = { success: false, content: "" }
       let toolStartedAt = Date.now()
 
-      // ── Rate limit: per-round caps on high-frequency tools ──
-      const cat: ToolCategory = inferToolCategory(tc.name, tool)
-      const rateCaps: Partial<Record<ToolCategory, { count: number; max: number }>> = {
-        shell: { count: rateLimitShell, max: 5 },
-        file: { count: rateLimitFile, max: 10 },
-        network: { count: rateLimitNetwork, max: 3 },
-      }
-      const cap = rateCaps[cat]
-      if (cap && cap.count >= cap.max) {
-        resultContent = `频率限制：本回合 ${cat} 工具已达上限 (${cap.count}/${cap.max})。请在下一回合继续。`
-        resultObj = { success: false, content: resultContent }
+      if (preRoundCtx.taskPlanning && round > 0) {
+        resultContent = `任务追踪已阻止：当前是计划专用回合，只允许输出计划，不允许调用 ${tc.name}。下一轮将进入执行阶段。`
+        resultObj = { success: false, content: resultContent, metadata: { blocked: true, planOnlyRound: true } }
         resultsContent.push({ type: "tool_result", tool_use_id: tc.id, content: resultContent.slice(0, 4000) })
-        if (cat === "shell") rateLimitShell++; else if (cat === "file") rateLimitFile++; else if (cat === "network") rateLimitNetwork++
         continue
       }
-      if (cat === "shell") rateLimitShell++; else if (cat === "file") rateLimitFile++; else if (cat === "network") rateLimitNetwork++
 
-      // ── PermissionGate: deny always hard-blocks; ask may be auto-allowed in full mode ──
-      if (tool) {
-        const perm = permissionGate.check(tc.name, tc.input, tool)
-        if (!perm.allowed) {
-          // deny: hard block always. ask: block unless full mode.
-          const isFullModeAsk = perm.level === "ask" && pmode === "full"
-          if (!isFullModeAsk) {
-            resultContent = PermissionGate.formatBlockedMessage(tc.name, perm, tc.input)
-            resultObj = { success: false, content: resultContent }
-            resultsContent.push({ type: "tool_result", tool_use_id: tc.id, content: resultContent.slice(0, 4000) })
-            continue
-          }
-          // full mode: ask is silently promoted to allow — but deny still blocks above
+      // ── Unified tool execution policy — all gates in one pure function ──
+      const policyResult = evaluateToolPolicy({
+        toolCall: { id: tc.id, name: tc.name, input: tc.input },
+        tool,
+        intentPolicy,
+        taskTracker,
+        rippleBlockActive,
+        pendingRippleObligations,
+        permissionGate,
+        permissionMode: pmode,
+        rateLimits: { safe: 0, shell: rateLimitShell, file: rateLimitFile, network: rateLimitNetwork, git: 0 },
+        webSearchFailedThisTurn,
+        webSearchFailReason,
+        finalText,
+      })
+
+      // ── Gate telemetry for tool policy gates ──
+      const toolGateNames = ["rate_limit", "permission", "readonly_intent", "ripple_block", "planning_phase", "web_search_failed"]
+      const blockedGate = policyResult.allowed ? null : policyResult.reason.startsWith("permission") ? "permission" : policyResult.reason
+      for (const gn of toolGateNames) {
+        if (gn === blockedGate) { gateTelemetry.record(gn, "block"); break }
+        gateTelemetry.record(gn, "pass")
+      }
+
+      // Track rate limits regardless of outcome
+      if (policyResult.incrementRateLimit === "shell") rateLimitShell++
+      else if (policyResult.incrementRateLimit === "file") rateLimitFile++
+      else if (policyResult.incrementRateLimit === "network") rateLimitNetwork++
+
+      if (!policyResult.allowed) {
+        resultContent = policyResult.blockMessage
+        resultObj = { success: false, content: resultContent }
+        // Hard blocks (rate_limit, permission:deny) push immediately and skip yield.
+        // Soft blocks (readonly, ripple, planning, web_search) fall through to yield.
+        if (policyResult.reason === "rate_limit" || policyResult.reason.startsWith("permission:")) {
+          resultsContent.push({ type: "tool_result", tool_use_id: tc.id, content: resultContent.slice(0, 4000) })
+          continue
         }
       }
 
-      if (tool && intentPolicy.mode === "readonly" && !tool.defn.isReadonly) {
-        resultContent = `意图门已阻止：当前请求是只读模式（${intentPolicy.reason}），不允许调用 ${tc.name}。请让用户明确要求执行后再写入或运行命令。`
-        resultObj = { success: false, content: resultContent }
-      } else if (tool && rippleBlockActive && !tool.defn.isReadonly) {
-        resultContent = `涟漪阻止：存在 ${pendingRippleObligations.length} 个未解决的调用方需要级联更新。请先用 multi_edit 完成所有受影响的调用方修改，然后再写新文件。`
-        resultObj = { success: false, content: resultContent }
-      } else if (tool && taskTracker?.phase === "planning" && !tool.defn.isReadonly) {
-        const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
-        resultContent = planningGate.ok
-          ? `任务追踪已阻止：长任务必须先完成规划回合，规划阶段不允许在同一轮调用 ${tc.name}。下一轮将进入执行阶段。`
-          : formatPlanningBlockedToolResult(planningGate)
-        resultObj = { success: false, content: resultContent }
-      } else if (tool && tc.name === "web_search" && webSearchFailedThisTurn) {
-        resultContent = `⚠️ 网页搜索不可用：${webSearchFailReason || "SearXNG Docker 未运行"}。\n\n解决方案（你来决定）：\n1) 启动 SearXNG Docker 容器修复搜索\n2) 用 web_fetch 直接访问已知 URL\n3) 用本地代码搜索 (findstr / grep) 代替\n4) 向用户报告搜索不可用，继续现有的本地分析`
-        resultObj = { success: false, content: resultContent }
-      } else if (tool) {
+      if (tool && policyResult.allowed) {
         const parallelResult = parallelResults.get(tc.id)
         // Use streaming variant if available (shell, long-running commands)
         if (parallelResult) {
@@ -1517,7 +1124,7 @@ export async function* agentLoop(
     }
 
     // ── Microcompact: forward pass — compact fresh tool results before they enter history ──
-    if (contextBudget.percent >= 35 || rawMessages.length >= 40) {
+    if (preRoundCtx.contextBudgetPercent >= 35 || rawMessages.length >= 40) {
       const mcResult = microcompactToolResults(resultsContent, completedToolCalls)
       while (resultsContent.length > 0) resultsContent.pop()
       for (const r of mcResult.results) resultsContent.push(r)
@@ -1584,51 +1191,29 @@ export async function* agentLoop(
     if (rippleReportsThisRound.length > 0) lastRippleReports = rippleReportsThisRound
 
     // ── Gate overflow: track cumulative blocks, force strategy switch at 3, BLOCKED at 5 ──
-    // Clear stale block entries
     sandbox.clearBlockedFiles()
 
-    const blockedGates: string[] = []
-    if (rippleBlockActive) blockedGates.push("ripple")
-    if (pendingRippleObligations.length > 0) blockedGates.push("ripple_obligations")
-    if (postToolPlanningPrompt || postToolRequiredFilesPrompt) {
-      if (postToolPlanningPrompt) blockedGates.push("planning")
-      if (postToolRequiredFilesPrompt) blockedGates.push("required_files")
-    }
+    const overflowResult = processGateOverflow({
+      round,
+      rippleBlockActive,
+      pendingRippleObligationsLength: pendingRippleObligations.length,
+      postToolPlanningPrompt,
+      postToolRequiredFilesPrompt,
+      gateBlockCounts,
+    })
+    for (const msg of overflowResult.deferredMessages) deferredGateMessages.push(msg)
+    for (const ev of overflowResult.statusEvents) yield { type: "status", data: ev }
 
-    for (const gate of blockedGates) {
-      const entry = gateBlockCounts.get(gate) ?? { count: 0, lastSeen: 0 }
-      entry.count++
-      entry.lastSeen = round
-      gateBlockCounts.set(gate, entry)
-    }
-    for (const [gate, entry] of gateBlockCounts) {
-      if (!blockedGates.includes(gate) && round - entry.lastSeen >= 2) gateBlockCounts.delete(gate)
-    }
-
-    for (const [gate, entry] of gateBlockCounts) {
-      if (entry.count === 3) {
-        deferredGateMessages.push([
-          "<system-reminder>",
-          `[Gate overflow] ${gate} 已拦截 3 次。不要继续走同一条路径。`,
-          gate === "ripple" ? "→ 停止逐文件编辑，立即用 multi_edit 级联修复所有调用方。" : "",
-          gate === "ripple_obligations" ? "→ 读取被影响的调用方文件并级联修复，不要再次触发写盘。" : "",
-          gate === "planning" ? "→ 缩小任务范围，列出最小可交付单元，不要追求完美方案。" : "",
-          gate === "completion" ? "→ 检查是否缺少外部验证证据（typecheck/test/build）。不要声称完成但不验证。" : "",
-          gate === "required_files" ? "→ 立即创建缺失的必需文件，停止分析已经存在的文件。" : "",
-          "</system-reminder>",
-        ].filter(Boolean).join("\n"))
-        yield { type: "status", data: `gate-overflow: ${gate} blocked 3 times` }
-      }
-      if (entry.count >= 5) {
-        const reason = `${gate} 累积阻断 ${entry.count} 次，请求人工介入。`
-        sm.transition(AgentState.BLOCKED, reason)
-        yield { type: "status", data: `gate-overflow: ${gate} blocked ${entry.count} times — BLOCKED` }
-        options.runTrace?.record("agent_loop_blocked", { reason, gate, blockCount: entry.count })
-        setRuntimeContextBudgetMode("normal")
-        sandbox.dispose()
-        setShellSandbox(null)
-        return
-      }
+    if (overflowResult.blocked) {
+      const reason = `${overflowResult.blockedGate} 累积阻断 ${overflowResult.blockedCount} 次，请求人工介入。`
+      sm.transition(AgentState.BLOCKED, reason)
+      yield { type: "status", data: `gate-overflow: ${overflowResult.blockedGate} blocked ${overflowResult.blockedCount} times — BLOCKED` }
+      options.runTrace?.record("agent_loop_blocked", { reason, gate: overflowResult.blockedGate, blockCount: overflowResult.blockedCount })
+      setRuntimeContextBudgetMode("normal")
+      sandbox.dispose()
+      setShellSandbox(null)
+      await flushTelemetry()
+      return
     }
 
     // ── Revise plan: stuck detection → push back to planning ──
@@ -1774,8 +1359,8 @@ export async function* agentLoop(
     // ── Thinking compaction (40% context budget, one-shot per session) ──
     if (
       !thinkingCompacted &&
-      contextBudget.mode === "normal" &&
-      contextBudget.percent >= 40 &&
+      preRoundCtx.contextBudgetMode === "normal" &&
+      preRoundCtx.contextBudgetPercent >= 40 &&
       options.thinkingStore
     ) {
       const thinkingRounds = collectThinkingRounds(rawMessages)
@@ -1961,7 +1546,7 @@ export async function* agentLoop(
       errorRate: round > 0 ? taskToolErrors / round : 0,
       round,
     }
-    const cpDecision = adaptiveCheckpointThreshold(contextBudget.percent, metrics)
+    const cpDecision = adaptiveCheckpointThreshold(preRoundCtx.contextBudgetPercent, metrics)
     if (cpDecision && !shouldSkipCheckpointThisRound(round)) {
       yield { type: "status", data: `checkpoint: ${cpDecision.label} (${cpDecision.urgency})` }
       saveCheckpoint({
@@ -1976,7 +1561,7 @@ export async function* agentLoop(
         coldMemorySHA: stablePrefixHash,
         knowledgeCount: 0,
         lastVerification: lastTypecheck ? { kind: "typecheck", passed: lastTypecheck.passed, command: "tsc --noEmit" } : null,
-        conversationTokens: contextBudget.percent > 0 ? Math.round(contextBudget.percent * 1000) : 0,
+        conversationTokens: preRoundCtx.contextBudgetPercent > 0 ? Math.round(preRoundCtx.contextBudgetPercent * 1000) : 0,
         prevRound: round,
         summary: formatCheckpointSummary({
           version: 1, round, timestamp: Date.now(), sessionId: "",
@@ -1987,7 +1572,7 @@ export async function* agentLoop(
           coldMemorySHA: stablePrefixHash,
           knowledgeCount: 0,
           lastVerification: lastTypecheck ? { kind: "typecheck", passed: lastTypecheck.passed, command: "tsc --noEmit" } : null,
-          conversationTokens: Math.round(contextBudget.percent * 1000),
+          conversationTokens: Math.round(preRoundCtx.contextBudgetPercent * 1000),
           prevRound: round,
           summary: `Round ${round}: ${taskModifiedFiles} files, ${taskToolErrors} errors`,
         }),
@@ -2034,233 +1619,10 @@ export async function* agentLoop(
   setRuntimeContextBudgetMode("normal")
   sandbox.dispose()
   setShellSandbox(null)
-}
 
-function runPostEditDiagnostics(path: string, result: { success: boolean; content: string }) {
-  if (!path.endsWith(".py") && !path.endsWith(".ts") && !path.endsWith(".tsx")) return
-  try {
-    let diagnostics = ""
-    if (path.endsWith(".py")) {
-      const out = execSync(`ruff check "${path}" --output-format concise`, { encoding: "utf-8", timeout: 10000 })
-      if (out.trim()) diagnostics = out.trim()
-    }
-    if (path.endsWith(".ts") || path.endsWith(".tsx")) {
-      // LSP fast path: notify change + read cached diagnostics for this file
-      const lsp = getLSPClient()
-      lsp.notifyChange(path).catch(() => {})
-      // Small delay for LSP to process (non-blocking — we just wait a tick)
-      const lspResult = lsp.getVerificationResult(path)
-      if (lspResult && lspResult.issues > 0) {
-        diagnostics = lspResult.summary
-      } else if (!lsp.isAvailable) {
-        // LSP unavailable — fall back to full tsc (preserved ground truth)
-        const check = runTypeScriptNoEmit(process.cwd())
-        const out = check.passed ? "" : check.output
-        if (out.trim() && out.includes(path)) diagnostics = out.trim().split("\n").filter(l => l.includes(path)).join("\n")
-      }
-    }
-    if (diagnostics && result.success) { ;(result as Record<string, unknown>).content = result.content + `\n\n[diagnostics]\n${diagnostics}` }
-  } catch { /* not available */ }
-}
-
-function runRippleVerification(modifiedFiles: Set<string>): { passed: boolean; available: boolean; issues: number; output?: string } {
-  const tsFiles = [...modifiedFiles].filter(path => path.endsWith(".ts") || path.endsWith(".tsx"))
-  if (!tsFiles.length) return { passed: true, available: true, issues: 0 }
-  if (!tsFiles.some(path => existsSync(resolve(path)))) return { passed: true, available: true, issues: 0 }
-
-  // LSP fast path: check cached diagnostics for modified files
-  const lsp = getLSPClient()
-  if (lsp.isAvailable) {
-    let totalErrors = 0
-    const summaries: string[] = []
-    for (const file of tsFiles) {
-      const counts = lsp.getSeverityCounts(file)
-      if (counts.errors > 0) {
-        totalErrors += counts.errors
-        summaries.push(`${file}: ${counts.errors} errors`)
-      }
-    }
-    if (totalErrors > 0) {
-      return { passed: false, available: true, issues: totalErrors, output: summaries.join("\n") }
-    }
-    return { passed: true, available: true, issues: 0, output: "LSP: no errors" }
+  // ── Gate telemetry: yield summary + auto-save if configured ──
+  if (gateTelemetry.gateNames().length > 0) {
+    yield { type: "status", data: `gate-telemetry: ${gateTelemetry.gateNames().length} gates\n${gateTelemetry.report()}` }
   }
-
-  // LSP unavailable — tsc ground truth
-  return runTypeScriptNoEmit(process.cwd())
-}
-
-// ── Thinking compaction helpers ──
-
-interface CollectedThinkingRound {
-  roundNum: number
-  thinking: string
-  toolsUsed: string[]
-  hadError: boolean
-}
-
-function collectThinkingRounds(messages: ProviderMessage[]): CollectedThinkingRound[] {
-  const rounds: CollectedThinkingRound[] = []
-  let roundNum = 0
-  for (const msg of messages) {
-    if (msg.role !== "assistant") continue
-    const content = Array.isArray(msg.content) ? msg.content : []
-    const thinkingBlocks: string[] = []
-    const toolNames: string[] = []
-    for (const block of content) {
-      if (isRecord(block) && block.type === "thinking" && typeof block.thinking === "string") {
-        thinkingBlocks.push(block.thinking)
-      }
-      if (isRecord(block) && block.type === "tool_use" && typeof block.name === "string") {
-        toolNames.push(block.name)
-      }
-    }
-    if (thinkingBlocks.length > 0) {
-      rounds.push({
-        roundNum: roundNum++,
-        thinking: thinkingBlocks.join("\n---\n"),
-        toolsUsed: toolNames,
-        hadError: false, // approximated — errors detected during tool execution, not in history
-      })
-    }
-  }
-  return rounds
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-// ── Thinking insufficiency detection ──
-
-function collectRecentTurns(messages: ProviderMessage[], count: number): Array<{ role: string; content: string }> {
-  return messages.slice(-count).map(m => {
-    const content = Array.isArray(m.content)
-      ? m.content.filter((b: unknown) => isRecord(b) && b.type === "text").map((b: Record<string, unknown>) => String(b.text ?? "")).join("\n")
-      : String(m.content ?? "")
-    return { role: m.role, content: content.slice(0, 800) }
-  })
-}
-
-// ── Microcompact: tool result placeholder substitution ──
-
-const MC_READFILE_CHARS = Number(process.env.DEEPSEEK_READFILE_COMPACT_CHARS) || 0
-const MC_SHELL_CHARS = Number(process.env.DEEPSEEK_SHELL_COMPACT_CHARS) || 3000
-const MC_WEBFETCH_CHARS = Number(process.env.DEEPSEEK_WEBFETCH_COMPACT_CHARS) || 5000
-
-function mcThreshold(toolName: string): number {
-  if (toolName === "read_file") return MC_READFILE_CHARS
-  if (toolName === "shell") return MC_SHELL_CHARS
-  if (toolName === "web_fetch") return MC_WEBFETCH_CHARS
-  return Infinity
-}
-
-/** Extract future-tense promises from agent text for testimony ledger. */
-function extractPromises(text: string): string[] {
-  const patterns = [
-    /(?:接下来|下一步|随后|下一步骤|马上|立即|现在)\s*(?:我会|我将|我们要|需要)\s*([^。\n]{4,40})/g,
-    /(?:我会|我将|我们要|打算)\s*([^。\n]{4,40})/g,
-    /(?:需要\s*(?:再|补充|额外|进一步))\s*([^。\n]{4,40})/g,
-  ]
-  const results: string[] = []
-  for (const pattern of patterns) {
-    let match: RegExpExecArray | null
-    while ((match = pattern.exec(text)) !== null) {
-      const p = match[1]?.trim()
-      if (p && p.length > 3 && !p.includes("？") && !p.includes("?")) {
-        results.push(p)
-      }
-    }
-  }
-  return [...new Set(results)].slice(0, 5)
-}
-
-function microcompactToolResults(
-  results: Array<Record<string, unknown>>,
-  completedCalls: Array<{ id: string; name: string; input: Record<string, unknown> }>,
-): { compacted: number; results: Array<Record<string, unknown>> } {
-  let compacted = 0
-  const nameById = new Map(completedCalls.map(tc => [tc.id, tc]))
-  const out: Array<Record<string, unknown>> = []
-  for (const r of results) {
-    if (r.type !== "tool_result" || typeof r.content !== "string" || r.content.length < 100) {
-      out.push(r); continue
-    }
-    const tc = nameById.get(String(r.tool_use_id ?? ""))
-    if (!tc) { out.push(r); continue }
-    const threshold = mcThreshold(tc.name)
-    if (threshold <= 0 || r.content.length <= threshold) { out.push(r); continue }
-    const pathOrCmd = tc.name === "read_file" ? String(tc.input.path ?? "")
-      : tc.name === "shell" ? String(tc.input.command ?? "").slice(0, 80)
-      : tc.name === "web_fetch" ? String(tc.input.url ?? "")
-      : ""
-    const prefix = r.content.slice(0, 300)
-    const placeholder = `[Microcompact: ${tc.name} ${pathOrCmd} — ${r.content.length} chars trimmed. Re-execute ${tc.name}(${JSON.stringify(pathOrCmd)}) to retrieve full content.]`
-    out.push({ ...r, content: prefix + "\n\n" + placeholder })
-    compacted++
-  }
-  return { compacted, results: out }
-}
-
-function compactHistoricalToolResults(messages: ProviderMessage[], keepRecentRounds: number): number {
-  let compacted = 0
-  let assistantCount = 0
-  const compactAfterAssistant = messages.length - keepRecentRounds * 2
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!
-    if (msg.role === "assistant") assistantCount++
-    if (assistantCount <= compactAfterAssistant) continue
-    if (msg.role !== "user" || !Array.isArray(msg.content)) continue
-    for (const block of msg.content) {
-      if (!isRecord(block) || block.type !== "tool_result" || typeof block.content !== "string" || block.content.includes("[Microcompact:")) continue
-      if (block.content.length < 400) continue
-      const tid = String(block.tool_use_id ?? "")
-      // Only compact read_file/shell/web_fetch whose full output is embedded
-      if (!/^(read_file|shell|web_fetch)/.test(tid.split("_")[0] ?? "")) continue
-      if (block.content.length < MC_READFILE_CHARS && block.content.length < MC_SHELL_CHARS) continue
-      block.content = block.content.slice(0, 300) + `\n\n[Microcompact: historical ${tid.slice(0, 8)}… — content trimmed. Re-execute the original tool call to retrieve.]`
-      compacted++
-    }
-  }
-  return compacted
-}
-
-// ──
-
-interface StateMachineInput {
-  roundHadToolError: boolean
-  hadSearchTool: boolean
-  hadWriteTool: boolean
-  hadVerifyTool: boolean
-  isDone: boolean
-  pendingRippleCount: number
-}
-
-function updateStateMachine(sm: StateMachine, input: StateMachineInput) {
-  const current = sm.currentState
-  try {
-    if (input.isDone && current !== AgentState.DONE) {
-      sm.transition(AgentState.DONE, `task complete (pending ripple: ${input.pendingRippleCount})`)
-      return
-    }
-    if (input.roundHadToolError && current !== AgentState.REPAIR && current !== AgentState.BLOCKED) {
-      sm.transition(AgentState.REPAIR, "tool errors detected")
-      return
-    }
-    if (input.hadVerifyTool && (current === AgentState.CODE || current === AgentState.REPAIR)) {
-      sm.transition(AgentState.VERIFY, "verification running")
-      return
-    }
-    if (input.hadWriteTool && current !== AgentState.CODE && current !== AgentState.VERIFY && current !== AgentState.REPAIR) {
-      sm.transition(AgentState.CODE, "writing code")
-      return
-    }
-    if (input.hadSearchTool && (current === AgentState.UNDERSTAND || current === AgentState.SEARCH)) {
-      sm.transition(AgentState.SEARCH, "searching")
-      return
-    }
-  } catch {
-    // Transition validation failed — state machine caught an illegal transition.
-    // The ad-hoc flags still drive behavior; SM is a monitoring layer.
-  }
+  await flushTelemetry()
 }

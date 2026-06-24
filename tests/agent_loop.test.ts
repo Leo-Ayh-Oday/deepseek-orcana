@@ -96,11 +96,13 @@ class CacheStableProvider implements LLMProvider {
   systems: string[] = []
   messages: ProviderCallOptions["messages"][] = []
   toolCounts: number[] = []
+  toolNames: string[][] = []
 
   async *streamChat(options: ProviderCallOptions): AsyncGenerator<StreamEvent> {
     this.systems.push(options.system)
     this.messages.push(options.messages)
     this.toolCounts.push(options.tools?.length ?? 0)
+    this.toolNames.push((options.tools ?? []).map(tool => String(tool.name)))
     if (this.rounds++ === 0) {
       yield { type: "tool_call", data: { id: "r1", name: "read_file", input: { path: "src/provider/types.ts" } } }
       return
@@ -350,9 +352,11 @@ class LongTaskPlanAndWriteSameRoundProvider implements LLMProvider {
 class LongTaskReadonlyThenPlanProvider implements LLMProvider {
   rounds = 0
   toolCounts: number[] = []
+  toolNames: string[][] = []
 
   async *streamChat(options: ProviderCallOptions): AsyncGenerator<StreamEvent> {
     this.toolCounts.push(options.tools?.length ?? 0)
+    this.toolNames.push((options.tools ?? []).map(tool => String(tool.name)))
     if (this.rounds++ === 0) {
       yield { type: "tool_call", data: { id: "scan", name: "project_structure", input: { max_depth: 3 } } }
       return
@@ -1041,9 +1045,10 @@ describe("Agent loop greedy tool execution", () => {
 
     expect(provider.systems).toHaveLength(1)
     expect(provider.systems[0]).not.toContain("Stable Cold Memory")
-    expect(JSON.stringify(provider.messages[0]?.[0])).toContain("Stable Prefix Context")
-    expect(JSON.stringify(provider.messages[0]?.[0])).toContain("Stable Cold Memory")
-    expect(JSON.stringify(provider.messages[0]?.[0])).toContain("keep cache prefix stable")
+    // langContextMsg is the first context message (language instruction), stable prefix is second
+    expect(JSON.stringify(provider.messages[0]?.[1])).toContain("Stable Prefix Context")
+    expect(JSON.stringify(provider.messages[0]?.[1])).toContain("Stable Cold Memory")
+    expect(JSON.stringify(provider.messages[0]?.[1])).toContain("keep cache prefix stable")
   })
 
   test("injects experience kernel as stable prefix context (not system prompt)", async () => {
@@ -1381,7 +1386,7 @@ describe("Agent loop greedy tool execution", () => {
     expect(events.some(e => e.type === "status" && String(e.data).includes("已读取计划，进入执行阶段"))).toBe(true)
   })
 
-  test("long task forces a plan-only round after readonly exploration", async () => {
+  test("long task plan-only round keeps provider tools stable for prefix cache", async () => {
     const provider = new LongTaskReadonlyThenPlanProvider()
     const tools = buildTools(
       {
@@ -1419,8 +1424,54 @@ describe("Agent loop greedy tool execution", () => {
     }
 
     expect(provider.toolCounts[0]).toBeGreaterThan(0)
-    expect(provider.toolCounts[1]).toBe(0)
+    expect(provider.toolCounts[1]).toBe(provider.toolCounts[0])
+    expect(provider.toolNames[1]).toEqual(provider.toolNames[0])
+    expect(provider.toolNames[1]).toContain("write_file")
     expect(events.some(e => e.type === "status" && String(e.data).includes("规划阶段只输出计划"))).toBe(true)
+  })
+
+  test("dynamic tool disclosure can still empty plan-only provider tools when cache-stable mode is disabled", async () => {
+    const oldStableTools = process.env.DEEPSEEK_CACHE_STABLE_TOOLS
+    process.env.DEEPSEEK_CACHE_STABLE_TOOLS = "0"
+    try {
+      const provider = new LongTaskReadonlyThenPlanProvider()
+      const tools = buildTools(
+        {
+          name: "project_structure",
+          description: "fake scan",
+          isReadonly: true,
+          inputSchema: { type: "object", properties: {} },
+          execute() {
+            return Result.ok("Project is empty")
+          },
+        },
+        {
+          name: "write_file",
+          description: "fake write",
+          isReadonly: false,
+          inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+          execute() {
+            return Result.ok("wrote")
+          },
+        },
+      )
+
+      for await (const _event of agentLoop("Build a complete full-stack personal blog with React, API, tests, and build verification", {
+        provider,
+        model: "test",
+        tools,
+        maxRounds: 3,
+        conversationHistory: [
+          { role: "user", content: "Build a full-stack personal blog with React/Vite, Bun API, tests, responsive design, and build verification." },
+          { role: "assistant", content: "[clarification-gate]\n## 需求确认" },
+        ],
+      })) {}
+
+      expect(provider.toolCounts[0]).toBeGreaterThan(0)
+      expect(provider.toolCounts[1]).toBe(0)
+    } finally {
+      restoreEnv("DEEPSEEK_CACHE_STABLE_TOOLS", oldStableTools)
+    }
   })
 
   test("thin planning artifact accepted without scoring (Claude Code Nag model)", async () => {

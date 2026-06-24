@@ -1,0 +1,147 @@
+import type { ToolDescriptor } from "../../tools/registry"
+import { evaluatePlanningArtifact, formatPlanningBlockedToolResult } from "../planning-gate"
+import { PermissionGate } from "../permission"
+import { inferToolCategory, type ToolCategory } from "../permission"
+import type { TaskTracker } from "../task-tracker"
+import type { RippleObligation } from "../../ripple/obligations"
+
+// ── Types ──
+
+export interface ToolPolicyInput {
+  toolCall: { id: string; name: string; input: Record<string, unknown> }
+  tool: ToolDescriptor | undefined
+  intentPolicy: { mode: string; reason: string }
+  taskTracker: ReturnType<typeof import("../task-tracker").createTaskTracker> | null
+  rippleBlockActive: boolean
+  pendingRippleObligations: RippleObligation[]
+  permissionGate: PermissionGate
+  permissionMode: "full" | "strict"
+  rateLimits: Record<ToolCategory, number>
+  webSearchFailedThisTurn: boolean
+  webSearchFailReason: string
+  finalText: string
+}
+
+export interface ToolPolicyBlocked {
+  allowed: false
+  reason: string
+  blockMessage: string
+  category: ToolCategory
+  incrementRateLimit: ToolCategory
+}
+
+export interface ToolPolicyAllowed {
+  allowed: true
+  category: ToolCategory
+  incrementRateLimit: ToolCategory
+}
+
+export type ToolPolicyResult = ToolPolicyBlocked | ToolPolicyAllowed
+
+// ── Constants ──
+
+const RATE_CAPS: Record<ToolCategory, number> = {
+  safe: Infinity,
+  shell: 5,
+  file: 10,
+  network: 3,
+  git: Infinity,
+}
+
+// ── Policy evaluation ──
+
+/**
+ * Evaluate whether a tool call should be allowed to execute.
+ * Pure function — does not mutate state or execute tools.
+ * All policy decisions are centralized here so no gate can be bypassed by ordering.
+ */
+export function evaluateToolPolicy(input: ToolPolicyInput): ToolPolicyResult {
+  const { toolCall, tool, intentPolicy, taskTracker, rippleBlockActive, pendingRippleObligations, permissionGate, permissionMode, rateLimits, webSearchFailedThisTurn, webSearchFailReason, finalText } = input
+  const cat = inferToolCategory(toolCall.name, tool)
+
+  // Gate 1: Rate limit
+  const cap = RATE_CAPS[cat]
+  const currentCount = rateLimits[cat]
+  if (currentCount >= cap) {
+    return {
+      allowed: false,
+      reason: "rate_limit",
+      blockMessage: `频率限制：本回合 ${cat} 工具已达上限 (${currentCount}/${cap})。请在下一回合继续。`,
+      category: cat,
+      incrementRateLimit: cat,
+    }
+  }
+
+  // Gate 2: PermissionGate — deny always hard-blocks; ask may be auto-allowed in full mode
+  if (tool) {
+    const perm = permissionGate.check(toolCall.name, toolCall.input, tool)
+    if (!perm.allowed) {
+      const isFullModeAsk = perm.level === "ask" && permissionMode === "full"
+      if (!isFullModeAsk) {
+        return {
+          allowed: false,
+          reason: `permission:${perm.level}`,
+          blockMessage: PermissionGate.formatBlockedMessage(toolCall.name, perm, toolCall.input),
+          category: cat,
+          incrementRateLimit: cat,
+        }
+      }
+      // full mode: ask is silently promoted to allow; deny still blocks above
+    }
+  }
+
+  // Gate 3: Readonly intent — block write tools
+  if (tool && intentPolicy.mode === "readonly" && !tool.defn.isReadonly) {
+    return {
+      allowed: false,
+      reason: "readonly_intent",
+      blockMessage: `意图门已阻止：当前请求是只读模式（${intentPolicy.reason}），不允许调用 ${toolCall.name}。请让用户明确要求执行后再写入或运行命令。`,
+      category: cat,
+      incrementRateLimit: cat,
+    }
+  }
+
+  // Gate 4: Ripple block — pending obligations block writes
+  if (tool && rippleBlockActive && !tool.defn.isReadonly) {
+    return {
+      allowed: false,
+      reason: "ripple_block",
+      blockMessage: `涟漪阻止：存在 ${pendingRippleObligations.length} 个未解决的调用方需要级联更新。请先用 multi_edit 完成所有受影响的调用方修改，然后再写新文件。`,
+      category: cat,
+      incrementRateLimit: cat,
+    }
+  }
+
+  // Gate 5: Planning phase — block writes before plan accepted
+  if (tool && taskTracker?.phase === "planning" && !tool.defn.isReadonly) {
+    const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
+    const blockMessage = planningGate.ok
+      ? `任务追踪已阻止：长任务必须先完成规划回合，规划阶段不允许在同一轮调用 ${toolCall.name}。下一轮将进入执行阶段。`
+      : formatPlanningBlockedToolResult(planningGate)
+    return {
+      allowed: false,
+      reason: "planning_phase",
+      blockMessage,
+      category: cat,
+      incrementRateLimit: cat,
+    }
+  }
+
+  // Gate 6: Web search failure
+  if (tool && toolCall.name === "web_search" && webSearchFailedThisTurn) {
+    return {
+      allowed: false,
+      reason: "web_search_failed",
+      blockMessage: `⚠️ 网页搜索不可用：${webSearchFailReason || "SearXNG Docker 未运行"}。\n\n解决方案（你来决定）：\n1) 启动 SearXNG Docker 容器修复搜索\n2) 用 web_fetch 直接访问已知 URL\n3) 用本地代码搜索 (findstr / grep) 代替\n4) 向用户报告搜索不可用，继续现有的本地分析`,
+      category: cat,
+      incrementRateLimit: cat,
+    }
+  }
+
+  // All gates passed
+  return {
+    allowed: true,
+    category: cat,
+    incrementRateLimit: cat,
+  }
+}

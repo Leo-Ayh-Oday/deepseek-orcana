@@ -31,6 +31,12 @@ export interface AgentOptions {
   autoFinishOnVerifiedWrite?: boolean
   runTrace?: AgentRunTrace
   stableMemoryContext?: string
-  sessionId?: string  // for checkpoint persistence
-  resumeFromCheckpoint?: SessionCheckpoint  // set when resuming a session
+  autoApprovePlan?: boolean
+  modelRouter?: import("../provider/router").ModelRouter
+  sessionId?: string
+  resumeFromCheckpoint?: SessionCheckpoint
+  /** Optional: gate telemetry collector for the 3-step validation plan. */
+  gateTelemetry?: import("./gates/telemetry").GateTelemetry
+  /** Optional: file path to auto-save telemetry on agent exit. */
+  gateTelemetryFile?: string
 }

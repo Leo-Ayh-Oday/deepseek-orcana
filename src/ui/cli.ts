@@ -605,6 +605,7 @@ async function runTurn(
     runTrace,
     sessionId,
     modelRouter: router,
+    gateTelemetryFile: ".wolf/gate-telemetry.json",
     ...(resumeFromCheckpoint ? { resumeFromCheckpoint } : {}),
   }
 

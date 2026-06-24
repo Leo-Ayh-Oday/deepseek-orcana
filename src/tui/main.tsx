@@ -226,6 +226,7 @@ function useAgentStream(apiKey: string, prompt?: string) {
       tools: allTools,
       maxRounds: 30,
       conversationHistory: historySnapshot,
+      gateTelemetryFile: ".wolf/gate-telemetry.json",
     }
 
     let cancelled = false
