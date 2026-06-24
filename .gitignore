@@ -5,6 +5,9 @@ dist/
 .codegraph/
 .wolf/
 
+# Bun-only project — no npm lockfile
+package-lock.json
+
 # Runtime traces and local agent state
 .deepseek-code/
 

@@ -101,7 +101,8 @@ export async function* agentLoop(
   prompt: string,
   options: AgentOptions,
 ): AsyncGenerator<StreamEvent> {
-  const { provider, model, tools, maxRounds = 50, stagedContext, hooks } = options
+  const maxRoundsFromEnv = process.env.DEEPSEEK_MAX_ROUNDS ? parseInt(process.env.DEEPSEEK_MAX_ROUNDS, 10) : undefined
+  const { provider, model, tools, maxRounds = maxRoundsFromEnv ?? 50, stagedContext, hooks } = options
   const effectivePrompt = buildEffectivePrompt(prompt, options.conversationHistory)
   const language = detectLanguage(effectivePrompt)
   const langInstruction = languageInstruction(language)

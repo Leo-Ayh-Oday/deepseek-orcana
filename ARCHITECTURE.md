@@ -65,7 +65,7 @@ ROUND START
 
 `loop.ts:1562-1607`
 
-When any gate blocks the agent, a counter increments. At **3 blocks**, the system injects a targeted strategy-switch prompt. At **5 blocks**, the agent enters `BLOCKED` state — game over, human must intervene.
+When any gate blocks the agent, a counter increments. At **3 blocks**, the system injects a targeted strategy-switch prompt (plain text `<system-reminder>` — the model can still choose to ignore it). At **5 blocks**, the agent enters `BLOCKED` state — game over, human must intervene. **Limitation:** the 3→5 window is only 2 chances via natural-language prompts; there is no structural enforcement until the hard BLOCKED state.
 
 ```
 Gate-specific escalation messages:
@@ -97,7 +97,7 @@ Key: the same error key (`toolName + content[:80]`) must match across rounds, pr
 A completely separate model call (always `deepseek-v4-flash`, ~1/10 cost of Pro) that reads the conversation tail and evaluates whether the task is truly complete.
 
 **Design invariants:**
-- **Zero identity bias**: Flash has no "skin in the game"
+- **Reduced identity bias**: Flash runs in separate stateless API calls — it has no "skin in the game" from generating the output it evaluates. However, it shares the same base model training distribution as the main agent, so systematic biases from that distribution are not eliminated — only self-justification of its own outputs is blocked.
 - **Circuit breaker**: max 3 evaluations per task
 - **Three verdicts**: SATISFIED / NOT_SATISFIED / IMPOSSIBLE
 - **Testimony Ledger**: tracks agent promises vs evidence across rounds, detects circular promises ("I'll test next round" × N never delivered)
@@ -406,7 +406,7 @@ DeepSeek V4 Flash (`deepseek-v4-flash`) — ~1/10 cost, ~1/3 latency, no thinkin
 | **Knowledge Distillation** | `memory/distiller.ts:92` | Extracts structured knowledge from web search results |
 | **Plan Judging** | `evaluator/plan-judge.ts` | Cold model evaluates the agent's plan from outside the conversation |
 
-Each role has its own prompt template, circuit breaker, and graceful degradation path. The Flash model never touches the main conversation — it operates in **separate, stateless calls** with zero identity alignment to the main agent.
+Each role has its own prompt template, circuit breaker, and graceful degradation path. The Flash model never touches the main conversation — it operates in **separate, stateless calls** preventing self-justification bias (the evaluator didn't write what it's judging). **Limitation:** all models share the same training distribution, so systemic biases from that distribution are not eliminated — only direct self-evaluation loops are broken.
 
 ### 3. Fill-in-the-Middle (FIM) — V4 Beta API
 
@@ -422,6 +422,8 @@ Agent: edit_fim { filePath, instruction, startLine, endLine }
 ```
 
 Also supports `editFunction(filePath, instruction, functionName)` — scans for function boundaries and fills within them. This is **not** a generic LLM feature — it's a DeepSeek-specific API endpoint.
+
+**Risk note:** The `/beta` prefix on this endpoint means the API contract, pricing, and availability are not guaranteed stable. If DeepSeek changes this endpoint, both `edit_fim` and `editFunction` break — these are dependencies in the core editing toolchain. The fallback is the standard `edit_file` tool (search-and-replace), but for large refactors this degrades to significantly more API calls. Consider monitoring the `/beta` → stable transition timeline.
 
 ### 4. 1M Context Window + Budget Gating
 
@@ -596,7 +598,7 @@ These are hard-won lessons from development, recorded to prevent regression:
 
 | # | Lesson | Source |
 |---|--------|--------|
-| 1 | Don't define constraints in standalone modules — wire them into `loop.ts` | 3 systems defined but unused found during audit |
+| 1 | Don't define constraints in standalone modules — wire them into `loop.ts` | 3 systems defined but unused found during audit. **Note:** for a "constraint-first" project, this is the most damaging type of failure — mechanisms that exist in code but don't execute. The GateChain refactor (2026-06-24) directly addresses this by making all gates pass through a single `evaluate()` path with telemetry verification. |
 | 2 | Don't insert messages between `tool_use` and `tool_result` — DeepSeek API 400 | `loop.ts:750-752` |
 | 3 | Don't use `split(/\s+/)` for Chinese — use CJK bigram+trigram | `memory/tokenizer.ts:6-7` |
 | 4 | Don't run `tsc` per file — batch once per round | `loop.ts:1652` |
