@@ -54,6 +54,7 @@ describe("Clarification gate", () => {
       model: "test",
       tools: [],
       maxRounds: 2,
+      flashTriagePolicy: "off",
     })) {
       events.push(event)
     }

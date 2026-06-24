@@ -717,13 +717,13 @@ async function runTurn(
           })
           const normalized = answer.trim().toLowerCase()
           if (normalized === "" || normalized === "y" || normalized === "yes") {
-            warmHistory.push({ role: "user", content: "[PLAN_APPROVED] 用户已批准计划，进入执行阶段。" })
+            opts.initialPlanState = "approved"
             planNeedsReinvoke = true
           } else if (normalized === "x" || normalized === "cancel") {
             process.stdout.write(red("计划已取消\n"))
             return
           } else {
-            warmHistory.push({ role: "user", content: `[PLAN_REVISE] 用户要求修改计划：${answer}` })
+            warmHistory.push({ role: "user", content: `用户要求修改计划：${answer}` })
             planNeedsReinvoke = true
           }
           break

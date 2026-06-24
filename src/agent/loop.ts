@@ -64,38 +64,8 @@ import { createPreRoundChain } from "./gates/pre-round"
 import { createCompletionChain } from "./gates/completion"
 import { processGateOverflow } from "./gates/overflow"
 
-export interface UsageStats {
-  apiCalls: number
-  estimatedInputTokens: number
-  cacheHits: number
-  cacheMisses: number
-  flashRounds: number
-  proRounds: number
-  flashUsed: boolean
-}
-
-export interface AgentOptions {
-  provider: LLMProvider
-  model: string
-  tools: ToolDescriptor[]
-  maxRounds?: number
-  conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>
-  stagedContext?: StagedContextManager
-  thinkingStore?: ThinkingStore
-  knowledgeBase?: KnowledgeBase
-  thinkEffort?: "high" | "max"
-  hooks?: HookSystem
-  autoFinishOnVerifiedWrite?: boolean
-  runTrace?: AgentRunTrace
-  stableMemoryContext?: string
-  autoApprovePlan?: boolean
-  /** Optional: model router for sub-purpose model selection (compaction/semantic-recall etc.) */
-  modelRouter?: ModelRouter
-  /** Optional: gate telemetry collector for the 3-step validation plan. */
-  gateTelemetry?: GateTelemetry
-  /** Optional: file path to auto-save telemetry on agent exit. */
-  gateTelemetryFile?: string
-}
+import type { UsageStats, AgentOptions } from "./loop-types"
+export type { UsageStats, AgentOptions }
 
 export async function* agentLoop(
   prompt: string,
@@ -109,8 +79,19 @@ export async function* agentLoop(
 
   const rawMessages: ProviderMessage[] = []
 
+  // Load conversation history up to a token budget (~15% of 1M context).
+  // This replaces the hardcoded slice(-24) with budget-aware truncation.
   if (options.conversationHistory?.length) {
-    for (const h of options.conversationHistory.slice(-24)) {
+    const ESTIMATED_CHARS_PER_TOKEN = 3
+    const HISTORY_TOKEN_BUDGET = 150_000
+    let used = 0
+    const recent = options.conversationHistory.length > 60
+      ? options.conversationHistory.slice(-60)
+      : options.conversationHistory
+    for (const h of recent) {
+      const est = Math.ceil(h.content.length / ESTIMATED_CHARS_PER_TOKEN)
+      if (used + est > HISTORY_TOKEN_BUDGET) break
+      used += est
       rawMessages.push({ role: h.role, content: h.content })
     }
   }
@@ -143,7 +124,7 @@ export async function* agentLoop(
   const contextKernel = buildContextKernel(process.cwd())
 
   // ── Flash Triage: semantic task classification (replaces 4 keyword classifiers) ──
-  const flashTriagePolicy = resolveFlashTriagePolicy()
+  const flashTriagePolicy = options.flashTriagePolicy ?? resolveFlashTriagePolicy()
   const flashTriageEnabled = shouldUseFlashTriage(flashTriagePolicy, effectivePrompt, contextKernel.text)
   const flashTriage = flashTriageEnabled ? new FlashTriage(provider) : null
   const triageResult = flashTriage ? await flashTriage.triage(effectivePrompt, contextKernel.text) : null
@@ -158,7 +139,7 @@ export async function* agentLoop(
     intentPolicy = { mode: triageModeToIntent(triageResult.mode), reason: `Flash triage: ${triageResult.reasoning}` }
     const trackerDef = buildTrackerFromTriage(triageResult, effectivePrompt)
     if (trackerDef) {
-      taskTracker = { ...trackerDef, verificationEvidence: {}, verification: trackerDef.requiredVerificationKinds.map(k => k === "typecheck" ? "运行类型检查" : k === "test" ? "运行测试" : k === "build" ? "运行构建" : "运行验证"), requiredFiles: trackerDef.requiredFiles, requiredVerificationKinds: trackerDef.requiredVerificationKinds, steps: trackerDef.steps }
+      taskTracker = { ...trackerDef, verificationEvidence: {}, verification: trackerDef.requiredVerificationKinds.map(k => k === "typecheck" ? "运行类型检查" : k === "test" ? "运行测试" : k === "build" ? "运行构建" : "运行验证") }
     }
     triageSkillPrompts = activateSkillsByNames(triageResult.relevantSkillNames)
   } else {
@@ -209,7 +190,7 @@ export async function* agentLoop(
   let rateLimitShell = 0
   let rateLimitFile = 0
   let rateLimitNetwork = 0
-  let planApproved = false
+  let planApproved = options.initialPlanState === "approved"
   let planningRejections = 0
   let taskHadWrite = false
   let taskToolErrors = 0
@@ -321,7 +302,6 @@ export async function* agentLoop(
   }
 
   const usage: UsageStats = { apiCalls: 0, estimatedInputTokens: 0, cacheHits: 0, cacheMisses: 0, flashRounds: 0, proRounds: 0, flashUsed: false }
-  if (options.conversationHistory) { ;(options as unknown as Record<string, unknown>)._usage = usage }
 
   // Cumulative context tracking (DeepSeek V4: 1M context window)
   let contextInputTotal = 0
@@ -330,16 +310,6 @@ export async function* agentLoop(
 
   for (let round = 0; round < maxRounds; round++) {
     options.runTrace?.record("round_started", { round })
-    // ── Plan approval detection: check for synthetic plan messages from CLI ──
-    const lastMsg = rawMessages.length > 0 ? rawMessages[rawMessages.length - 1] : null
-    if (lastMsg?.role === "user" && typeof lastMsg.content === "string") {
-      if (lastMsg.content.startsWith("[PLAN_APPROVED]")) {
-        planApproved = true
-      } else if (lastMsg.content.startsWith("[PLAN_REVISE]")) {
-        planApproved = false
-        // Revision feedback stays in rawMessages; loop re-evaluates the plan
-      }
-    }
     const thinkingDecision = decideThinkingPlan(state, requestedMaxThinking ? "max" : options.thinkEffort, {
       prompt: effectivePrompt,
       intentMode: intentPolicy.mode,

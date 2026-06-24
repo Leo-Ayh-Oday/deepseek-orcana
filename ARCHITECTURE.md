@@ -126,7 +126,7 @@ Output: {mode, needsWeb, researchQueries, planSteps, requiredVerification, riskL
 Fallback: keyword classifiers (graceful degradation)
 ```
 
-Config: `DEEPSEEK_FLASH_TRIAGE=off|auto|always` (default: off)
+Config: `DEEPSEEK_FLASH_TRIAGE=off|auto|always` (default: auto — short prompts <240 chars auto-skip)
 
 ### 5. Ripple Engine — TypeScript-Aware Dependency Analysis
 
@@ -573,7 +573,7 @@ Env-to-feature table (all with sensible defaults):
 
 | Variable | Feature | Default |
 |----------|---------|---------|
-| `DEEPSEEK_FLASH_TRIAGE` | Semantic entrance classification | `off` |
+| `DEEPSEEK_FLASH_TRIAGE` | Semantic entrance classification | `auto` |
 | `DEEPSEEK_CONTEXT_WARN_RATIO` | Context budget warning threshold | 0.5 |
 | `DEEPSEEK_CONTEXT_BLOCK_RATIO` | Context budget block threshold | 0.6 |
 | `DEEPSEEK_COST_MODE` | Disable optional calls | `normal` |

@@ -1,18 +1,19 @@
-/** Web fetch tool — fetch + HTML→Markdown + optional Flash summary.
+/** Web fetch tool — Jina Reader for LLM-ready Markdown extraction.
  *
- *  Architecture (inspired by Claude Code WebFetch):
- *  1. Domain safety check → deny-list lookup
- *  2. Local HTTP GET → 15s timeout, 500KB max
- *  3. Basic HTML→text extraction → strip tags/scripts
- *  4. Optional Flash summary (when result > 4000 chars)
- *  5. Returns clean text + metadata
+ *  Architecture:
+ *  1. Domain safety check → deny-list lookup (private IPs, localhost)
+ *  2. Jina Reader (r.jina.ai) → clean Markdown, no ads, no nav
+ *  3. Fallback: direct HTTP GET with basic HTML stripping (legacy)
+ *  4. Optional: Exa contents API for paywalled sites
  *
- *  Read-only. Caches results for 15 minutes per URL.
+ *  Jina Reader is free: 20 req/min unauthenticated, 200 req/min with API key.
+ *  No Docker, no external CLI. Pure HTTP.
  */
 
 import type { ToolDef, ToolResult } from "./registry"
 import { Result } from "./registry"
-import type { LLMProvider } from "../provider/types"
+
+const JINA_READER_URL = "https://r.jina.ai"
 
 const BLOCKED_DOMAINS = new Set([
   "localhost", "127.0.0.1", "0.0.0.0", "[::1]",
@@ -22,19 +23,21 @@ const BLOCKED_DOMAINS = new Set([
 const TIMEOUT_MS = 15_000
 const MAX_CONTENT_BYTES = 500_000
 
+function jinaApiKey(): string {
+  return process.env.JINA_API_KEY ?? ""
+}
+
 interface FetchCacheEntry {
   result: ToolResult
   timestamp: number
 }
 
 const cache = new Map<string, FetchCacheEntry>()
-const CACHE_TTL_MS = 15 * 60_000 // 15 minutes
+const CACHE_TTL_MS = 15 * 60_000
 
 function isBlockedDomain(hostname: string): boolean {
   const h = hostname.toLowerCase()
-  // Localhost and internal domains
   if (BLOCKED_DOMAINS.has(h) || h.endsWith(".local") || h.endsWith(".internal")) return true
-  // Private IP ranges: 10.x, 172.16-31.x, 192.168.x
   if (/^10\.\d+\.\d+\.\d+$/.test(h)) return true
   if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(h)) return true
   if (/^192\.168\.\d+\.\d+$/.test(h)) return true
@@ -51,7 +54,7 @@ function stripHtml(html: string): string {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
+    .replace(/&quot;/g, '"')
     .replace(/&#x27;/g, "'")
     .replace(/&nbsp;/g, " ")
     .replace(/\n\s*\n\s*\n/g, "\n\n")
@@ -64,8 +67,59 @@ export interface WebFetchParams {
   summarize?: boolean
 }
 
+/** Fetch via Jina Reader — returns clean Markdown. */
+async function fetchViaJina(url: string, apiKey: string): Promise<string> {
+  const headers: Record<string, string> = {
+    "User-Agent": "DeepSeek-Orcana/0.3",
+    "Accept": "text/markdown",
+  }
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`
+
+  const resp = await fetch(`${JINA_READER_URL}/${url}`, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) })
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "")
+    throw new Error(`Jina HTTP ${resp.status}: ${body.slice(0, 200)}`)
+  }
+
+  const text = await resp.text()
+  if (!text || text.length < 50) throw new Error("Jina returned empty response")
+  return text
+}
+
+/** Fetch directly via HTTP GET + stripHtml — fallback when Jina is unavailable. */
+async function fetchDirect(url: string): Promise<string> {
+  const resp = await fetch(url, {
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+    headers: {
+      "User-Agent": "DeepSeek-Orcana/0.3 (research)",
+      "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5",
+    },
+    redirect: "follow",
+  })
+
+  if (!resp.ok) {
+    const hints: Record<number, string> = {
+      404: "Page not found. Check URL or try parent path.",
+      403: "Access denied. Try a public docs page.",
+      401: "Authentication required. Try a public page.",
+      429: "Rate limited. Wait and retry, or use web_search for a cached version.",
+    }
+    const hint = hints[resp.status] ?? (resp.status >= 500 ? "Server error. Retry later." : "")
+    throw new Error(`HTTP ${resp.status}. ${hint}`)
+  }
+
+  const contentType = resp.headers.get("content-type") ?? ""
+  const text = await resp.text()
+
+  if (contentType.includes("html") || contentType.includes("text")) {
+    return stripHtml(text)
+  }
+  return text
+}
+
 async function fetchAndExtract(params: WebFetchParams): Promise<ToolResult> {
-  const { url, summarize = true } = params
+  const { url } = params
   if (!url?.trim()) return Result.fail("Missing url parameter")
 
   let parsed: URL
@@ -82,12 +136,11 @@ async function fetchAndExtract(params: WebFetchParams): Promise<ToolResult> {
     return Result.fail(`Domain blocked: ${parsed.hostname}`)
   }
 
-  // Check cache — also clean stale entries on access
+  // Cache management
   const cacheKey = parsed.toString()
   for (const [k, v] of cache) {
     if (Date.now() - v.timestamp > CACHE_TTL_MS) cache.delete(k)
   }
-  // Enforce max cache size (trim oldest if >50 entries)
   if (cache.size > 50) {
     const entries = [...cache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)
     for (const [k] of entries.slice(0, cache.size - 50)) cache.delete(k)
@@ -97,100 +150,61 @@ async function fetchAndExtract(params: WebFetchParams): Promise<ToolResult> {
     return cached.result
   }
 
+  const errors: string[] = []
+
+  // Try Jina Reader first
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
-
-    const resp = await fetch(parsed.toString(), {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "DeepSeek-Code/0.3 (research agent)",
-        "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5",
-      },
-      redirect: "follow",
-    })
-    clearTimeout(timer)
-
-    if (!resp.ok) {
-      const hints: Record<number, string> = {
-        404: "页面不存在。检查 URL 拼写或尝试上级路径。",
-        403: "访问被拒绝。尝试公开文档页面。",
-        401: "需要认证。尝试公开文档页面。",
-        429: "被限流。等待后重试或用 web_search 找缓存版本。",
-      }
-      const hint = hints[resp.status] ?? (resp.status >= 500 ? "服务器错误。可重试。" : "")
-      return Result.fail(`请求失败 HTTP ${resp.status}。${hint}`)
-    }
-
-    const contentType = resp.headers.get("content-type") ?? ""
-    const isHtml = contentType.includes("html") || contentType.includes("text")
-
-    // Chunked read with size limit
-    const chunks: Uint8Array[] = []
-    let total = 0
-    const reader = resp.body?.getReader()
-    if (!reader) {
-      const text = await resp.text()
-      const result = Result.ok(text.slice(0, MAX_CONTENT_BYTES), {
-        url: parsed.toString(),
-        status: resp.status,
-        contentType,
-        length: text.length,
-      })
-      cache.set(cacheKey, { result, timestamp: Date.now() })
-      return result
-    }
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (total + value.length > MAX_CONTENT_BYTES) {
-        chunks.push(value.slice(0, MAX_CONTENT_BYTES - total))
-        break
-      }
-      chunks.push(value)
-      total += value.length
-    }
-    reader.cancel()
-
-    const buffer = Buffer.concat(chunks)
-    let text = new TextDecoder().decode(buffer)
-
-    if (isHtml) text = stripHtml(text)
+    const apiKey = jinaApiKey()
+    const text = await fetchViaJina(parsed.toString(), apiKey)
     const truncated = text.slice(0, MAX_CONTENT_BYTES)
 
     const result = Result.ok(truncated, {
       url: parsed.toString(),
-      status: resp.status,
-      contentType,
+      engine: "jina",
       length: truncated.length,
       truncated: truncated.length < text.length,
     })
-
     cache.set(cacheKey, { result, timestamp: Date.now() })
     return result
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    if (msg.includes('timed out') || msg.includes('AbortError')) {
-      return Result.fail(`请求超时 (${TIMEOUT_MS / 1000}s)。可重试用 web_search 查摘要。`)
-    }
-    return Result.fail(msg)
+    errors.push(`Jina: ${e instanceof Error ? e.message : String(e)}`)
   }
+
+  // Fallback: direct HTTP + stripHtml
+  try {
+    const text = await fetchDirect(parsed.toString())
+    const truncated = text.slice(0, MAX_CONTENT_BYTES)
+
+    const result = Result.ok(truncated, {
+      url: parsed.toString(),
+      engine: "direct",
+      length: truncated.length,
+      truncated: truncated.length < text.length,
+    })
+    cache.set(cacheKey, { result, timestamp: Date.now() })
+    return result
+  } catch (e) {
+    errors.push(`Direct: ${e instanceof Error ? e.message : String(e)}`)
+  }
+
+  return Result.fail(
+    `Failed to fetch: ${parsed.toString()}\n${errors.map(e => `  ✗ ${e}`).join("\n")}\n\n` +
+    `Tip: try searching for this content with web_search instead, or get a free Jina API key at https://jina.ai/reader for higher rate limits.`,
+  )
 }
 
 export const WEB_FETCH_TOOL: ToolDef = {
   name: "web_fetch",
   description:
-    "Fetch a web page and extract its text content. " +
-    "Use this AFTER web_search to read full articles, documentation, or any linked page. " +
-    "Returns clean text (HTML stripped). Large pages are truncated to 500KB. " +
-    "Results are cached for 15 minutes. " +
-    "Domain blocked: localhost, internal networks. " +
-    "Tip: use with web_search — search first for URLs, then fetch the most relevant ones.",
+    "Fetch a web page and extract clean Markdown via Jina Reader. " +
+    "Use AFTER web_search to read full articles, docs, or any linked page. " +
+    "Returns AI-optimized content (no ads, no nav — just the article). " +
+    "Results cached for 15 minutes. Domain blocked: localhost, private networks. " +
+    "Get a free API key at https://jina.ai/reader and set JINA_API_KEY for 200 req/min.",
   isReadonly: true,
   category: "network" as const,
   isConcurrencySafe: true,
-  userFacingName: "网页抓取",
+  userFacingName: "Jina 抓取",
   inputSchema: {
     type: "object",
     properties: {

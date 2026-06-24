@@ -7,7 +7,13 @@
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/deepseek-orcana"><img src="https://img.shields.io/npm/v/deepseek-orcana" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/deepseek-orcana"><img src="https://img.shields.io/npm/dw/deepseek-orcana" alt="npm weekly downloads"></a>
+  <a href="https://github.com/Leo-Ayh-Oday/deepseek-orcana"><img src="https://img.shields.io/github/stars/Leo-Ayh-Oday/deepseek-orcana?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/Leo-Ayh-Oday/deepseek-orcana/issues"><img src="https://img.shields.io/github/issues/Leo-Ayh-Oday/deepseek-orcana" alt="GitHub issues"></a>
+  <br>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f9f1e4" alt="Runtime: Bun"></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen.svg" alt="Contributions welcome"></a>
 </p>
 

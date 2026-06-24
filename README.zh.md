@@ -7,7 +7,13 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://www.npmjs.com/package/deepseek-orcana"><img src="https://img.shields.io/npm/v/deepseek-orcana" alt="npm 版本"></a>
+  <a href="https://www.npmjs.com/package/deepseek-orcana"><img src="https://img.shields.io/npm/dw/deepseek-orcana" alt="npm 周下载量"></a>
+  <a href="https://github.com/Leo-Ayh-Oday/deepseek-orcana"><img src="https://img.shields.io/github/stars/Leo-Ayh-Oday/deepseek-orcana?style=flat" alt="GitHub stars"></a>
+  <a href="https://github.com/Leo-Ayh-Oday/deepseek-orcana/issues"><img src="https://img.shields.io/github/issues/Leo-Ayh-Oday/deepseek-orcana" alt="GitHub issues"></a>
+  <br>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="协议: MIT"></a>
+  <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f9f1e4" alt="运行时: Bun"></a>
   <a href="./CONTRIBUTING.zh.md"><img src="https://img.shields.io/badge/贡献-欢迎-brightgreen.svg" alt="欢迎贡献"></a>
 </p>
 

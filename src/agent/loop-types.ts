@@ -39,4 +39,8 @@ export interface AgentOptions {
   gateTelemetry?: import("./gates/telemetry").GateTelemetry
   /** Optional: file path to auto-save telemetry on agent exit. */
   gateTelemetryFile?: string
+  /** Set to "approved" when re-invoking after user approved the plan (replaces [PLAN_APPROVED] message protocol). */
+  initialPlanState?: "approved"
+  /** Override Flash Triage policy for this run ("off" | "auto" | "always"). */
+  flashTriagePolicy?: "off" | "auto" | "always"
 }

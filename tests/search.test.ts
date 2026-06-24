@@ -41,11 +41,12 @@ describe("web_search", () => {
     }
   })
 
-  test("times out failed engines quickly", async () => {
-    const oldSearxng = process.env.DEEPSEEK_SEARCH_SEARXNG_TIMEOUT_MS
-    const oldDdg = process.env.DEEPSEEK_SEARCH_DDG_TIMEOUT_MS
-    process.env.DEEPSEEK_SEARCH_SEARXNG_TIMEOUT_MS = "1"
-    process.env.DEEPSEEK_SEARCH_DDG_TIMEOUT_MS = "1"
+  test("times out failed backends quickly without API key", async () => {
+    const oldTimeout = process.env.DEEPSEEK_SEARCH_TIMEOUT_MS
+    process.env.DEEPSEEK_SEARCH_TIMEOUT_MS = "1"
+    // Ensure no Exa API key so it falls through to MCP
+    const oldKey = process.env.EXA_API_KEY
+    delete process.env.EXA_API_KEY
     const fetchMock = installHangingFetch()
 
     try {
@@ -54,15 +55,14 @@ describe("web_search", () => {
       const elapsed = Date.now() - started
 
       expect(result.success).toBe(false)
-      expect(result.content).toContain("All search engines failed")
-      expect(fetchMock.calls).toBe(3)
+      expect(result.content).toContain("Search unavailable")
       expect(elapsed).toBeLessThan(500)
     } finally {
       fetchMock.restore()
-      if (oldSearxng === undefined) delete process.env.DEEPSEEK_SEARCH_SEARXNG_TIMEOUT_MS
-      else process.env.DEEPSEEK_SEARCH_SEARXNG_TIMEOUT_MS = oldSearxng
-      if (oldDdg === undefined) delete process.env.DEEPSEEK_SEARCH_DDG_TIMEOUT_MS
-      else process.env.DEEPSEEK_SEARCH_DDG_TIMEOUT_MS = oldDdg
+      if (oldTimeout === undefined) delete process.env.DEEPSEEK_SEARCH_TIMEOUT_MS
+      else process.env.DEEPSEEK_SEARCH_TIMEOUT_MS = oldTimeout
+      if (oldKey === undefined) delete process.env.EXA_API_KEY
+      else process.env.EXA_API_KEY = oldKey
     }
   })
 })

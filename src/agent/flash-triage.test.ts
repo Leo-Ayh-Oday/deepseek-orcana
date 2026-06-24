@@ -20,7 +20,7 @@ class CountingProvider implements LLMProvider {
 
 describe("FlashTriage cost policy", () => {
   test("resolves explicit Flash triage policies", () => {
-    expect(resolveFlashTriagePolicy(undefined)).toBe("off")
+    expect(resolveFlashTriagePolicy(undefined)).toBe("auto")
     expect(resolveFlashTriagePolicy("0")).toBe("off")
     expect(resolveFlashTriagePolicy("auto")).toBe("auto")
     expect(resolveFlashTriagePolicy("1")).toBe("always")
