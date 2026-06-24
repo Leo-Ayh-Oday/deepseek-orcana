@@ -1,6 +1,7 @@
 import type { RippleObligation } from "../ripple/obligations"
 import type { VerificationResult } from "../verification/result"
 import type { TaskTracker } from "./task-tracker"
+import type { UILanguage } from "./language"
 
 export interface CompletionGateInput {
   finalText: string
@@ -87,7 +88,19 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
   }
 }
 
-export function formatCompletionGatePrompt(report: CompletionGateReport): string {
+export function formatCompletionGatePrompt(report: CompletionGateReport, language?: UILanguage): string {
+  if (language === "zh") {
+    return [
+      "## 完成门",
+      "你现在不能给出最终完成答复。外部证据仍然缺失或相互矛盾。",
+      "",
+      "缺失的证据或未完成项：",
+      ...report.missing.slice(0, 16).map(item => `- ${item}`),
+      "",
+      "下一步：",
+      "使用工具解决第一个缺失项，运行具体的验证命令，只有当此门可以产生证据报告时才结束。",
+    ].join("\n")
+  }
   return [
     "## External Completion Gate",
     "You cannot give a final completion answer yet. External evidence is still missing or contradictory.",
@@ -100,7 +113,16 @@ export function formatCompletionGatePrompt(report: CompletionGateReport): string
   ].join("\n")
 }
 
-export function formatBlockedCompletion(report: CompletionGateReport): string {
+export function formatBlockedCompletion(report: CompletionGateReport, language?: UILanguage): string {
+  if (language === "zh") {
+    return [
+      "## 完成被阻止",
+      "外部证据仍然缺失，无法诚实地标记此任务为完成。",
+      "",
+      "缺失项：",
+      ...report.missing.slice(0, 16).map(item => `- ${item}`),
+    ].join("\n")
+  }
   return [
     "## Completion blocked",
     "External evidence is still missing, so I cannot honestly mark this task complete.",
@@ -110,7 +132,25 @@ export function formatBlockedCompletion(report: CompletionGateReport): string {
   ].join("\n")
 }
 
-export function formatCompletionEvidenceReport(finalText: string, report: CompletionGateReport): string {
+export function formatCompletionEvidenceReport(finalText: string, report: CompletionGateReport, language?: UILanguage): string {
+  if (language === "zh") {
+    const lines = [
+      "## 交付报告",
+      compactFinalText(finalText),
+      "",
+      "## 证据",
+      ...(report.evidenceLines.length > 0 ? report.evidenceLines.map(item => `- ${item}`) : ["- 未记录结构化验证结果"]),
+    ]
+    if (report.changedFiles.length > 0) {
+      lines.push("", "## 已变更文件", ...report.changedFiles.slice(0, 12).map(file => `- ${file}`))
+    }
+    lines.push(
+      "",
+      "## 风险",
+      ...(report.residualRisks.length > 0 ? report.residualRisks.map(item => `- ${item}`) : ["- 无未解决的运行时门风险记录"]),
+    )
+    return lines.join("\n")
+  }
   const lines = [
     "## Delivery Report",
     compactFinalText(finalText),
@@ -118,7 +158,6 @@ export function formatCompletionEvidenceReport(finalText: string, report: Comple
     "## Evidence",
     ...(report.evidenceLines.length > 0 ? report.evidenceLines.map(item => `- ${item}`) : ["- no structured verification result was recorded"]),
   ]
-
   if (report.changedFiles.length > 0) {
     lines.push("", "## Changed Files", ...report.changedFiles.slice(0, 12).map(file => `- ${file}`))
   }
@@ -127,6 +166,5 @@ export function formatCompletionEvidenceReport(finalText: string, report: Comple
     "## Risk",
     ...(report.residualRisks.length > 0 ? report.residualRisks.map(item => `- ${item}`) : ["- no unresolved runtime gate risk recorded"]),
   )
-
   return lines.join("\n")
 }

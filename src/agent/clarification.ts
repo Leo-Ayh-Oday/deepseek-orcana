@@ -1,5 +1,6 @@
 import type { TaskTracker } from "./task-tracker"
 import type { LLMProvider, ProviderCallOptions } from "../provider/types"
+import type { UILanguage } from "./language"
 
 export const CLARIFICATION_MARKER = "[clarification-gate]"
 
@@ -20,6 +21,7 @@ export interface ModelClarificationInput {
   prompt: string
   tracker: TaskTracker
   result: ClarificationResult
+  language?: UILanguage
 }
 
 export interface ClarificationOption {
@@ -249,8 +251,13 @@ export function formatModelClarificationFailure(): string {
 }
 
 export function buildModelClarificationCall(input: ModelClarificationInput): ProviderCallOptions {
+  const lang = input.language ?? "en"
+  const langLine = lang === "zh"
+    ? "用户使用中文。你必须用中文生成所有问题和选项文本。"
+    : "The user is using English. Generate all questions and options in English."
   const system = [
     "You are DeepSeek Code's clarification question generator.",
+    langLine,
     "Only clarify requirements. Do not implement, plan, or call tools.",
     "Do not use hardcoded template questions. Questions must be derived from the user's request and tracker facts.",
     "",

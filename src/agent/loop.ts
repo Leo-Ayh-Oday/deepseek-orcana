@@ -52,6 +52,7 @@ import { buildEffectivePrompt, buildModelClarificationCall, evaluateClarificatio
 import { buildExperienceKernelContext } from "../experience/kernel"
 import { compactThinkingChain } from "../memory/compactor"
 import { evaluatePlanningArtifact, forcePlanningPassAfterLimit, formatPlanningBlockedToolResult, formatPlanningGatePrompt } from "./planning-gate"
+import { detectLanguage, languageInstruction, type UILanguage } from "./language"
 import { evaluateCompletionGate, formatBlockedCompletion, formatCompletionEvidenceReport, formatCompletionGatePrompt, needsExternalCompletionGate } from "./completion-gate"
 import { formatGenericProviderStreamBlockedReport, formatGenericProviderStreamRecoveryPrompt, formatProviderStreamBlockedReport, formatProviderStreamRecoveryPrompt } from "./runtime-failure"
 import { buildResearchEvidenceContext, buildResearchInsufficientEvidenceMessage, type ResearchEvidence } from "./research-answer"
@@ -484,6 +485,8 @@ export async function* agentLoop(
 ): AsyncGenerator<StreamEvent> {
   const { provider, model, tools, maxRounds = 50, stagedContext, hooks } = options
   const effectivePrompt = buildEffectivePrompt(prompt, options.conversationHistory)
+  const language = detectLanguage(effectivePrompt)
+  const langInstruction = languageInstruction(language)
 
   const rawMessages: ProviderMessage[] = []
 
@@ -607,6 +610,7 @@ export async function* agentLoop(
         prompt: effectivePrompt,
         tracker: taskTracker,
         result: clarification,
+        language,
       })
       modelInputTokens = Math.max(1, Math.round((clarificationCall.system.length + JSON.stringify(clarificationCall.messages).length) / 3))
       try {
@@ -752,7 +756,9 @@ export async function* agentLoop(
     // message inserted between an assistant(tool_use) and user(tool_result)
     // is a 400 error. So volatile/planning/budget context must precede
     // rawMessages, never follow it.
+    const langContextMsg: ProviderMessage = { role: "user", content: langInstruction }
     const contextMessages: ProviderMessage[] = [
+      langContextMsg,
       ...(stablePrefixContext ? [stablePrefixContext] : []),
       ...(researchContext ? [researchContext] : []),
       ...(volatileContext ? [volatileContext] : []),
@@ -1141,19 +1147,19 @@ export async function* agentLoop(
         })
         if (!completionReport.allowed && round + 1 < maxRounds) {
           rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-          rawMessages.push({ role: "user", content: formatCompletionGatePrompt(completionReport) })
+          rawMessages.push({ role: "user", content: formatCompletionGatePrompt(completionReport, language) })
           yield { type: "status", data: `external-completion-gate: blocked (${completionReport.missing.length} missing)` }
           options.runTrace?.record("gate_decision", { gate: "external_completion", decision: "continue", missing: completionReport.missing })
           continue
         }
         if (!completionReport.allowed) {
           yield { type: "status", data: `external-completion-gate: blocked (${completionReport.missing.length} missing)` }
-          yield { type: "text", data: formatBlockedCompletion(completionReport) }
+          yield { type: "text", data: formatBlockedCompletion(completionReport, language) }
           options.runTrace?.record("gate_decision", { gate: "external_completion", decision: "blocked", missing: completionReport.missing })
           break
         }
         yield { type: "status", data: "external-completion-gate: evidence accepted" }
-        yield { type: "text", data: formatCompletionEvidenceReport(finalText, completionReport) }
+        yield { type: "text", data: formatCompletionEvidenceReport(finalText, completionReport, language) }
         options.runTrace?.record("gate_decision", { gate: "external_completion", decision: "accepted", evidence: completionReport.evidenceLines })
 
         // ── Flash Judge: independent model completion verification ──
