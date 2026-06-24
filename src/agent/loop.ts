@@ -51,7 +51,7 @@ import {
 import { buildEffectivePrompt, buildModelClarificationCall, evaluateClarificationNeed, formatModelClarificationFailure, parseModelClarification } from "./clarification"
 import { buildExperienceKernelContext } from "../experience/kernel"
 import { compactThinkingChain } from "../memory/compactor"
-import { evaluatePlanningArtifact, formatPlanningBlockedToolResult, formatPlanningGatePrompt } from "./planning-gate"
+import { evaluatePlanningArtifact, forcePlanningPassAfterLimit, formatPlanningBlockedToolResult, formatPlanningGatePrompt } from "./planning-gate"
 import { evaluateCompletionGate, formatBlockedCompletion, formatCompletionEvidenceReport, formatCompletionGatePrompt, needsExternalCompletionGate } from "./completion-gate"
 import { formatGenericProviderStreamBlockedReport, formatGenericProviderStreamRecoveryPrompt, formatProviderStreamBlockedReport, formatProviderStreamRecoveryPrompt } from "./runtime-failure"
 import { buildResearchEvidenceContext, buildResearchInsufficientEvidenceMessage, type ResearchEvidence } from "./research-answer"
@@ -568,6 +568,7 @@ export async function* agentLoop(
   let rateLimitFile = 0
   let rateLimitNetwork = 0
   let planApproved = false
+  let planningRejections = 0
   let taskHadWrite = false
   let taskToolErrors = 0
   let taskModifiedFiles = 0
@@ -1012,9 +1013,20 @@ export async function* agentLoop(
       }
 
       if (taskTracker && taskTracker.phase === "planning" && round + 1 < maxRounds) {
+        // User already confirmed → skip gate, enter execution directly
+        if (planApproved) {
+          markPlanAccepted(taskTracker)
+          rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
+          rawMessages.push({ role: "user", content: formatTaskTrackerPrompt(taskTracker) })
+          yield { type: "status", data: "任务追踪: 用户已确认规划，进入执行阶段" }
+          planApproved = false
+          planningRejections = 0
+          continue
+        }
         const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
         rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
-        if (!planningGate.ok) {
+        if (!planningGate.ok && !forcePlanningPassAfterLimit(planningRejections)) {
+          planningRejections++
           rawMessages.push({ role: "user", content: formatPlanningGatePrompt(planningGate, taskTracker) })
           yield { type: "status", data: `planning-gate: revise plan (${planningGate.missing.length} missing)` }
           options.runTrace?.record("gate_decision", {
@@ -1024,6 +1036,12 @@ export async function* agentLoop(
             score: planningGate.score,
           })
           continue
+        }
+        if (planningGate.ok) {
+          planningRejections = 0
+        } else {
+          // force-pass after limit: gate not ok but we let it through anyway
+          yield { type: "status", data: `planning-gate: force-pass after ${planningRejections} rejections` }
         }
         // Plan passed evaluation but needs user approval
         if (!planApproved && !options.autoApprovePlan) {
@@ -1626,25 +1644,32 @@ export async function* agentLoop(
     }
 
     if (taskTracker?.phase === "planning" && finalText.trim()) {
-      const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
-      if (planningGate.ok) {
+      // User already confirmed → skip gate, accept directly
+      if (planApproved) {
         markPlanAccepted(taskTracker)
-        yield { type: "status", data: "任务追踪: 已读取计划，进入执行阶段" }
-        options.runTrace?.record("gate_decision", {
-          gate: "planning",
-          decision: "accepted",
-          score: planningGate.score,
-          signals: planningGate.signals,
-        })
-      } else if (round + 1 < maxRounds) {
-        postToolPlanningPrompt = formatPlanningGatePrompt(planningGate, taskTracker)
-        yield { type: "status", data: `planning-gate: revise plan (${planningGate.missing.length} missing)` }
-        options.runTrace?.record("gate_decision", {
-          gate: "planning",
-          decision: "revise",
-          missing: planningGate.missing,
-          score: planningGate.score,
-        })
+        yield { type: "status", data: "任务追踪: 用户已确认规划，进入执行阶段" }
+        planApproved = false
+      } else {
+        const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
+        if (planningGate.ok) {
+          markPlanAccepted(taskTracker)
+          yield { type: "status", data: "任务追踪: 已读取计划，进入执行阶段" }
+          options.runTrace?.record("gate_decision", {
+            gate: "planning",
+            decision: "accepted",
+            score: planningGate.score,
+            signals: planningGate.signals,
+          })
+        } else if (round + 1 < maxRounds) {
+          postToolPlanningPrompt = formatPlanningGatePrompt(planningGate, taskTracker)
+          yield { type: "status", data: `planning-gate: revise plan (${planningGate.missing.length} missing)` }
+          options.runTrace?.record("gate_decision", {
+            gate: "planning",
+            decision: "revise",
+            missing: planningGate.missing,
+            score: planningGate.score,
+          })
+        }
       }
     }
 

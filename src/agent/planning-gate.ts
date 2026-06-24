@@ -120,10 +120,10 @@ export function evaluatePlanningArtifact(text: string, tracker?: TaskTracker | n
     }
   }
 
-  // Gate threshold: 5/8 signals = good enough. Zero-missing forces infinite loops.
-  const minScore = 5
+  // Gate threshold: 4/8 signals = good enough. User confirmation skips gate entirely.
+  const minScore = 4
   return {
-    ok: missing.length <= 3 && score >= minScore,
+    ok: missing.length <= 4 && score >= minScore,
     score,
     missing,
     signals,
