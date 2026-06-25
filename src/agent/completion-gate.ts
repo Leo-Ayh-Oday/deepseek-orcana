@@ -3,6 +3,7 @@ import type { VerificationResult } from "../verification/result"
 import type { TaskTracker } from "./task-tracker"
 import type { UILanguage } from "./language"
 import { hasEvidence, requiredEvidenceKinds, evidenceKindLabel, type EvidenceLedger } from "./evidence-ledger"
+import { checkModeExitCriteria, getActiveMode } from "./mode-contract"
 
 export interface CompletionGateInput {
   finalText: string
@@ -50,7 +51,11 @@ function compactFinalText(text: string): string {
 }
 
 export function needsExternalCompletionGate(input: Pick<CompletionGateInput, "taskTracker" | "taskHadWrite" | "toolErrors">): boolean {
-  return Boolean(input.taskTracker || input.taskHadWrite || input.toolErrors > 0)
+  // PR 8: always evaluate when mode contract is active — modes have exit criteria
+  // that must be checked even without writes/tracker/errors (e.g. planner output_not_empty)
+  const activeMode = getActiveMode()
+  const hasModeExitCriteria = activeMode.exitCriteria.length > 0
+  return Boolean(input.taskTracker || input.taskHadWrite || input.toolErrors > 0 || hasModeExitCriteria)
 }
 
 export function evaluateCompletionGate(input: CompletionGateInput): CompletionGateReport {
@@ -89,7 +94,20 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
       }
     }
   }
-  if (!input.finalText.trim()) {
+  // PR 8: ModeContract exit criteria check
+  const activeMode = getActiveMode()
+  const modeExitResult = checkModeExitCriteria(activeMode, {
+    toolErrors: input.toolErrors,
+    finalText: input.finalText,
+    evidenceLedger: input.evidenceLedger,
+  })
+  if (!modeExitResult.met) {
+    for (const unmet of modeExitResult.unmet) {
+      missing.push(`[ModeContract:${activeMode.mode}] ${unmet}`)
+    }
+  }
+  // PR 8: skip generic empty-text check when mode contract already reports it
+  if (!input.finalText.trim() && modeExitResult.met) {
     residualRisks.push("model final text was empty")
   }
 

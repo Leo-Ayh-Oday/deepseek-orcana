@@ -6,6 +6,7 @@ import type { KnowledgeBase } from "../memory/knowledge"
 import type { HookSystem } from "../hooks"
 import type { AgentRunTrace } from "./run-trace"
 import type { SessionCheckpoint } from "../session/checkpoint"
+import type { ModeName } from "./mode-contract"
 
 export interface UsageStats {
   apiCalls: number
@@ -43,4 +44,9 @@ export interface AgentOptions {
   initialPlanState?: "approved"
   /** Override Flash Triage policy for this run ("off" | "auto" | "always"). */
   flashTriagePolicy?: "off" | "auto" | "always"
+  /** Plan text from a prior plan_ready event — passed back by CLI when user approves the plan.
+   *  Prevents losing the plan text across agentLoop invocations in the user-approval flow. */
+  planText?: string
+  /** PR 8: Active mode contract for role discipline. Defaults to "coder". */
+  activeMode?: ModeName
 }

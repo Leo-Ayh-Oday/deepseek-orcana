@@ -69,6 +69,7 @@ import { processGateOverflow } from "./gates/overflow"
 import { createEpochState, buildPlanStateContext, classifyEpochAction, formatEpochBudgetWarning, formatEpochStatus, totalMessageChars, epochRollover, type PlanStateInput } from "./context-epoch"
 import { setActivePatchContext } from "./patch-transaction"
 import { createEvidenceLedger, type EvidenceLedger } from "./evidence-ledger"
+import { setActiveMode, getActiveMode, formatModePrompt } from "./mode-contract"
 
 import type { UsageStats, AgentOptions } from "./loop-types"
 export type { UsageStats, AgentOptions }
@@ -190,6 +191,8 @@ export async function* agentLoop(
     jobMemoryLimitMb: process.env.DEEPSEEK_SANDBOX_MEMORY_MB ? Number(process.env.DEEPSEEK_SANDBOX_MEMORY_MB) : 512,
   })
   setShellSandbox(sandbox)
+  // PR 8: set active mode contract from options (defaults to "coder")
+  setActiveMode(options.activeMode ?? "coder")
   const pmode: "full" | "strict" = process.env.DEEPSEEK_PERMISSION_MODE === "strict" ? "strict" : "full"
   const toolLedger = new ToolExecutionLedger()
   let rippleBlockActive = false
@@ -488,6 +491,12 @@ export async function* agentLoop(
       volatileContext,
       planningContext,
     })
+
+    // PR 8: inject mode contract prompt — tells model what mode it's in
+    const modeContext = formatModePrompt(getActiveMode())
+    if (modeContext) {
+      contextMessages.push({ role: "user", content: modeContext })
+    }
 
     // ── Epoch check: estimate total chars and classify action ──
     const epochTotalChars = totalMessageChars(contextMessages) + totalMessageChars(rawMessages)
@@ -1064,10 +1073,11 @@ export async function* agentLoop(
         webSearchFailedThisTurn,
         webSearchFailReason,
         finalText,
+        modeContract: getActiveMode(),
       })
 
       // ── Gate telemetry for tool policy gates ──
-      const toolGateNames = ["rate_limit", "permission", "readonly_intent", "ripple_block", "planning_phase", "web_search_failed"]
+      const toolGateNames = ["rate_limit", "permission", "readonly_intent", "ripple_block", "planning_phase", "web_search_failed", "mode_contract"]
       const blockedGate = policyResult.allowed ? null : policyResult.reason.startsWith("permission") ? "permission" : policyResult.reason
       for (const gn of toolGateNames) {
         if (gn === blockedGate) { gateTelemetry.record(gn, "block"); break }

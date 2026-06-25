@@ -4,6 +4,7 @@ import { PermissionGate } from "../permission"
 import { inferToolCategory, type ToolCategory } from "../permission"
 import type { TaskTracker } from "../task-tracker"
 import type { RippleObligation } from "../../ripple/obligations"
+import { enforceModeTools, type ModeContract } from "../mode-contract"
 
 // ── Types ──
 
@@ -20,6 +21,8 @@ export interface ToolPolicyInput {
   webSearchFailedThisTurn: boolean
   webSearchFailReason: string
   finalText: string
+  /** PR 8: active mode contract for tool enforcement. */
+  modeContract?: ModeContract
 }
 
 export interface ToolPolicyBlocked {
@@ -135,6 +138,20 @@ export function evaluateToolPolicy(input: ToolPolicyInput): ToolPolicyResult {
       blockMessage: `⚠️ 网页搜索不可用：${webSearchFailReason || "SearXNG Docker 未运行"}。\n\n解决方案（你来决定）：\n1) 启动 SearXNG Docker 容器修复搜索\n2) 用 web_fetch 直接访问已知 URL\n3) 用本地代码搜索 (findstr / grep) 代替\n4) 向用户报告搜索不可用，继续现有的本地分析`,
       category: cat,
       incrementRateLimit: cat,
+    }
+  }
+
+  // Gate 7: ModeContract — enforce allowedTools/forbiddenTools (PR 8)
+  if (input.modeContract) {
+    const modeCheck = enforceModeTools(input.modeContract, toolCall.name)
+    if (!modeCheck.allowed) {
+      return {
+        allowed: false,
+        reason: "mode_contract",
+        blockMessage: modeCheck.reason,
+        category: cat,
+        incrementRateLimit: cat,
+      }
     }
   }
 
