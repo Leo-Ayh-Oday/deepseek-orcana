@@ -1,0 +1,22 @@
+# Auto-detect text files and normalize to LF on commit
+* text=auto
+
+# Shell scripts must be LF
+*.sh text eol=lf
+*.cjs text eol=lf
+
+# TypeScript/JavaScript source
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+
+# Config files
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+
+# Windows-specific files stay CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
