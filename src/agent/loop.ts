@@ -14,6 +14,9 @@ import { classifyIntent } from "./intent"
 import { FlashTriage, triageModeToIntent, triageToTaskIntent, buildTrackerFromTriage, activateSkillNamesByKeywords, resolveFlashTriagePolicy, shouldUseFlashTriage } from "./flash-triage"
 import { activateSkillsByNames } from "../skills/registry"
 import { revisePlan } from "./task-tracker"
+import type { TaskPacket } from "./task-packet"
+import { createMasterPlan, createMasterPlanFromPacket, nodesFromPlanText, markNodeDone, buildNodeReviewGate, currentNode, planComplete, planProgress, planRef, type MasterPlan } from "./master-plan"
+import { validatePlan, validateNode, formatValidationReport } from "./plan-validator"
 import { mergeProviderTokenUsage } from "../provider/usage"
 import { setRuntimeContextBudgetMode } from "./runtime-context"
 import type { RippleReport } from "../ripple/types"
@@ -63,6 +66,9 @@ import { buildContextMessages, buildRoundProviderRequest, cacheStableProviderToo
 import { createPreRoundChain } from "./gates/pre-round"
 import { createCompletionChain } from "./gates/completion"
 import { processGateOverflow } from "./gates/overflow"
+import { createEpochState, buildPlanStateContext, classifyEpochAction, formatEpochBudgetWarning, formatEpochStatus, totalMessageChars, epochRollover, type PlanStateInput } from "./context-epoch"
+import { setActivePatchContext } from "./patch-transaction"
+import { createEvidenceLedger, type EvidenceLedger } from "./evidence-ledger"
 
 import type { UsageStats, AgentOptions } from "./loop-types"
 export type { UsageStats, AgentOptions }
@@ -130,6 +136,9 @@ export async function* agentLoop(
   const triageResult = flashTriage ? await flashTriage.triage(effectivePrompt, contextKernel.text) : null
   let intentPolicy: ReturnType<typeof classifyIntent>
   let taskTracker: ReturnType<typeof createTaskTracker> = null
+  let masterPlan: MasterPlan | null = null
+  let evidenceLedger: EvidenceLedger = createEvidenceLedger()
+  let lastPlanText = ""
   let researchContext: ProviderMessage | null = null
   let researchEvidence: ResearchEvidence[] = []
   let triageSkillPrompts: string[] = []
@@ -163,6 +172,7 @@ export async function* agentLoop(
   let webSearchFailedThisTurn = false
   let webSearchFailReason = ""
   let announcedContextDegraded = false
+  let announcedEpochForceCompress = false
   let pendingRippleObligations: RippleObligation[] = []
   const cacheStableTools = process.env.DEEPSEEK_CACHE_STABLE_TOOLS !== "0"
   const confidenceEvaluator = new ConfidenceEvaluator()
@@ -308,6 +318,94 @@ export async function* agentLoop(
   let contextOutputTotal = 0
   const CONTEXT_MAX = 1_048_576
 
+  // ── Context Epoch (PR 4): four-layer context architecture ──
+  const epochState = createEpochState()
+
+  // ── MasterPlan: activate from planning artifact ──
+  const activateMasterPlan = (planText: string, goal: string, forcePassPacket?: TaskPacket): boolean => {
+    // PR 3: if force-passed with a minimal viable packet, use it directly
+    if (forcePassPacket) {
+      const plan = createMasterPlanFromPacket(forcePassPacket, "long_task")
+      planRef.current = plan; masterPlan = plan
+      const cur = currentNode(plan)
+      if (!cur) return false
+      taskTracker = cur.tracker
+      // PR 5: set active patch context from node's TaskPacket
+      if (cur._packet) {
+        setActivePatchContext({
+          scope: cur._packet.scope,
+          verification: cur._packet.verification.map(v => v.kind),
+          nodeId: cur.id,
+        })
+      }
+      return true
+    }
+
+    const nodes = nodesFromPlanText(planText)
+    const titles = nodes.length > 0
+      ? nodes.map(n => n.title)
+      : [goal.slice(0, 120) || "主要任务"]
+    const plan = createMasterPlan(goal, "long_task", titles)
+    // Transfer parsed dependencies
+    for (let i = 0; i < Math.min(nodes.length, plan.nodes.length); i++) {
+      for (const depIdx of nodes[i]?.dependsOn ?? []) {
+        const dep = plan.nodes[depIdx - 1]
+        const cur = plan.nodes[i]
+        if (dep && cur && !cur.dependsOn.includes(dep.id)) {
+          cur.dependsOn.push(dep.id); dep.blockedBy.push(cur.id)
+        }
+      }
+    }
+    planRef.current = plan; masterPlan = plan
+    // PR 3: re-validate after dependency transfer — mutations may introduce cycles
+    plan._lastValidation = validatePlan(plan)
+    const cur = currentNode(plan)
+    if (!cur) return false
+    taskTracker = cur.tracker
+    // PR 5: set active patch context from node's TaskPacket
+    if (cur._packet) {
+      setActivePatchContext({
+        scope: cur._packet.scope,
+        verification: cur._packet.verification.map(v => v.kind),
+        nodeId: cur.id,
+      })
+    }
+    return true
+  }
+
+  // ── MasterPlan node transition — called after current node passes all completion gates ──
+  const tryNodeTransition = (): boolean => {
+    if (!masterPlan || !taskTracker) return false
+    const cur = currentNode(masterPlan)
+    if (cur) markNodeDone(masterPlan, cur.id, "验证通过")
+    const review = buildNodeReviewGate(masterPlan, cur?.id ?? "")
+    // PR 3: validate plan before injecting review prompt
+    masterPlan._lastValidation = validatePlan(masterPlan)
+    // Inject as user message — this is an instruction to review the plan, not model output
+    const validationText = formatValidationReport(masterPlan._lastValidation)
+    const fullPrompt = validationText
+      ? `${review.promptText.slice(0, 1600)}\n\n${validationText}`
+      : review.promptText.slice(0, 2000)
+    rawMessages.push({ role: "user" as const, content: fullPrompt })
+    if (planComplete(masterPlan)) return false
+    // Blocked nodes still need model review — continue even when !review.resume
+    if (review.remaining === 0) return false
+    // If next node was auto-activated, swap to its tracker
+    const next = currentNode(masterPlan)
+    if (next && review.resume) {
+      taskTracker = next.tracker
+      // PR 5: set active patch context from next node's TaskPacket
+      if (next._packet) {
+        setActivePatchContext({
+          scope: next._packet.scope,
+          verification: next._packet.verification.map(v => v.kind),
+          nodeId: next.id,
+        })
+      }
+    }
+    return true
+  }
+
   for (let round = 0; round < maxRounds; round++) {
     options.runTrace?.record("round_started", { round })
     const thinkingDecision = decideThinkingPlan(state, requestedMaxThinking ? "max" : options.thinkEffort, {
@@ -356,6 +454,22 @@ export async function* agentLoop(
         : null
     }
     const stablePrefixContext = frozenStablePrefix
+    // ── Plan State Context (PR 4, Layer 2): survives epoch rollover ──
+    const planStateInput: PlanStateInput = {
+      masterPlan: planRef.current,
+      taskTracker,
+      taskPacket: planRef.current
+        ? (currentNode(planRef.current)?._packet ?? null)
+        : null,
+      rippleObligations: pendingRippleObligations,
+      userGoal: planRef.current?.goal ?? taskTracker?.goal ?? effectivePrompt.slice(0, 200),
+      decisions: [], // TODO PR 6/7: wire Evidence/Ripple decisions into plan state
+      round,
+    }
+    const planStateText = buildPlanStateContext(planStateInput)
+    const planStateContext: ProviderMessage | null = planStateText.length > 0
+      ? { role: "user", content: planStateText }
+      : null
     const volatileContext = buildVolatileContextMessage(ctxText, thinkContext, knowledgeContext)
     const taskPlanning = taskTracker?.phase === "planning"
     const planningContext: ProviderMessage | null = taskPlanning && taskTracker
@@ -369,10 +483,43 @@ export async function* agentLoop(
     const contextMessages = buildContextMessages({
       langInstruction,
       stablePrefixContext,
+      planStateContext,
       researchContext,
       volatileContext,
       planningContext,
     })
+
+    // ── Epoch check: estimate total chars and classify action ──
+    const epochTotalChars = totalMessageChars(contextMessages) + totalMessageChars(rawMessages)
+    const epochAction = classifyEpochAction(epochTotalChars, epochState.thresholds)
+    if (epochAction !== "none") {
+      yield { type: "status", data: formatEpochStatus(epochState, round, epochTotalChars) }
+    }
+
+    // ── Epoch rollover (PR 4): archive volatile tail when threshold reached ──
+    if (epochAction === "rollover") {
+      const rolloverResult = epochRollover(rawMessages, 3 /* keep 3 most recent turns */, planStateText, epochState, round)
+      if ("blocked" in rolloverResult) {
+        yield { type: "status", data: `epoch-rollover: blocked — ${rolloverResult.reason}` }
+        // Continue without rollover; will retry next round
+      } else {
+        // Replace rawMessages with rolled-over version
+        while (rawMessages.length > 0) rawMessages.pop()
+        for (const m of rolloverResult.messages) rawMessages.push(m)
+        epochState.currentEpochIndex++
+        epochState.epochStartRound = round
+        epochState.rolloverCount++
+        epochState.totalCharsTrimmed += rolloverResult.charsTrimmed
+        epochState.snapshots.push(rolloverResult.snapshot)
+        yield { type: "status", data: `epoch-rollover: ${rolloverResult.archivedCount} messages archived (${rolloverResult.charsTrimmed} chars), ${rawMessages.length} messages retained` }
+        options.runTrace?.record("epoch_rollover", {
+          epochIndex: rolloverResult.snapshot.index,
+          round,
+          archivedCount: rolloverResult.archivedCount,
+          charsTrimmed: rolloverResult.charsTrimmed,
+        })
+      }
+    }
     if (!announcedKernel) {
       announcedKernel = true
       yield { type: "status", data: `context-kernel: ${contextKernel.hash} (~${contextKernel.estimatedTokens} tokens)` }
@@ -436,6 +583,18 @@ export async function* agentLoop(
     if ((preRoundCtx.contextBudgetMode as string) === "degraded" && !announcedContextDegraded) {
       announcedContextDegraded = true
       yield { type: "status", data: `context-budget: degraded ${preRoundCtx.contextBudgetPercent}%; finish current stage only` }
+    }
+
+    // ── PR 4: Epoch budget warning on force-compress (one-shot) ──
+    if (epochAction === "forceCompress" && !announcedEpochForceCompress) {
+      announcedEpochForceCompress = true
+      const epochWarning = formatEpochBudgetWarning(
+        Math.round((epochTotalChars / epochState.thresholds.forceCompressChars) * 100),
+        epochState.thresholds,
+      )
+      // Inject as a user message into rawMessages to warn the model
+      rawMessages.push({ role: "user", content: epochWarning })
+      yield { type: "status", data: `epoch-budget: force-compress — ${Math.round(epochTotalChars / 1000)}k chars` }
     }
 
     // Apply ripple block side effects
@@ -679,6 +838,7 @@ export async function* agentLoop(
         }
         if (ctxExtra._planningPassed) {
           planningRejections = 0
+          lastPlanText = finalText
           // Plan ready — yield plan_ready event and break for user approval
           if (completionCtx.shouldBreak && completionCtx.breakEvent && !options.autoApprovePlan) {
             yield completionCtx.breakEvent as { type: "plan_ready"; data: unknown }
@@ -687,6 +847,10 @@ export async function* agentLoop(
           // Auto-approve: mark accepted and continue
           if (completionCtx.breakEvent?.type === "plan_ready") {
             markPlanAccepted(taskTracker!)
+            const forcePacket = ctxExtra._planningForcePass ? (ctxExtra._planningForcePassPacket as TaskPacket | undefined) : undefined
+            if (activateMasterPlan(finalText, taskTracker!.goal, forcePacket)) {
+              yield { type: "status", data: `master-plan: ${planProgress(masterPlan!)} nodes` }
+            }
             rawMessages.push({ role: "user", content: formatTaskTrackerPrompt(taskTracker!) })
             yield { type: "status", data: "任务追踪: 规划完成，进入执行阶段" }
             options.runTrace?.record("gate_decision", {
@@ -723,6 +887,7 @@ export async function* agentLoop(
           taskHadWrite,
           toolErrors: taskToolErrors,
           lastTypecheck,
+          evidenceLedger,
         })
         if (!completionReport.allowed && round + 1 < maxRounds) {
           rawMessages.push({ role: "assistant", content: compactAssistantContext(finalText) })
@@ -762,6 +927,16 @@ export async function* agentLoop(
           testimonyLedger.record(round, promisedThisRound, judgeResult.evidenceFound)
           if (judgeResult.verdict === "SATISFIED") {
             yield { type: "status", data: `flash-judge: ${judgeResult.evidenceFound.length} evidence items confirmed` }
+            // MasterPlan node transition: if more nodes remain, review plan and continue
+            if (masterPlan && tryNodeTransition()) {
+              yield { type: "status", data: `master-plan: ${planProgress(masterPlan)} → next node activated` }
+              options.runTrace?.record("gate_decision", { gate: "master_plan", decision: "next_node", progress: planProgress(masterPlan) })
+              continue
+            }
+            if (masterPlan) {
+              yield { type: "status", data: "master-plan: all nodes complete" }
+              options.runTrace?.record("gate_decision", { gate: "master_plan", decision: "plan_complete" })
+            }
             break
           }
           if (judgeResult.verdict === "IMPOSSIBLE") {
@@ -774,6 +949,15 @@ export async function* agentLoop(
           yield { type: "status", data: `flash-judge: not satisfied (${judgeResult.gaps.length} gaps)` }
           options.runTrace?.record("gate_decision", { gate: "flash_judge", decision: "continue", gaps: judgeResult.gaps })
           continue
+        }
+        // MasterPlan node transition: external gate passed, FlashJudge skipped
+        if (masterPlan && tryNodeTransition()) {
+          yield { type: "status", data: `master-plan: ${planProgress(masterPlan)} → next node activated` }
+          options.runTrace?.record("gate_decision", { gate: "master_plan", decision: "next_node", progress: planProgress(masterPlan) })
+          continue
+        }
+        if (masterPlan) {
+          yield { type: "status", data: "master-plan: all nodes complete" }
         }
         break
       }
@@ -1095,7 +1279,13 @@ export async function* agentLoop(
     }
 
     // ── Microcompact: forward pass — compact fresh tool results before they enter history ──
-    if (preRoundCtx.contextBudgetPercent >= 35 || rawMessages.length >= 40) {
+    // PR 4: use epoch compress threshold in addition to legacy heuristics
+    const shouldMicrocompact = preRoundCtx.contextBudgetPercent >= 35
+      || rawMessages.length >= 40
+      || epochAction === "compress"
+      || epochAction === "forceCompress"
+      || epochAction === "rollover"
+    if (shouldMicrocompact) {
       const mcResult = microcompactToolResults(resultsContent, completedToolCalls)
       while (resultsContent.length > 0) resultsContent.pop()
       for (const r of mcResult.results) resultsContent.push(r)
@@ -1196,6 +1386,9 @@ export async function* agentLoop(
       verificationResultsThisRound.length === 0 &&
       (consecutiveErrors >= 3 || !taskTracker.steps.some(s => s.status === "done"))
     ) {
+      // Only use singleton revisePlan when MasterPlan is not active.
+      // MasterPlan-level revisePlan (with frozen nodes) is deferred to PR 2.
+      if (!masterPlan) {
       const reason = consecutiveErrors >= 3
         ? `连续 ${consecutiveErrors} 次工具错误`
         : "步骤未推进，当前方案可能有问题"
@@ -1203,18 +1396,25 @@ export async function* agentLoop(
       deferredGateMessages.push(reviseMsg)
       yield { type: "status", data: `revise-plan: ${reason}` }
       options.runTrace?.record("gate_decision", { gate: "revise_plan", decision: "replan", reason })
+      } // if (!masterPlan)
     }
 
     if (taskTracker?.phase === "planning" && finalText.trim()) {
       // User already confirmed → skip gate, accept directly
       if (planApproved) {
         markPlanAccepted(taskTracker)
+        if ((options.planText ?? lastPlanText) && activateMasterPlan(options.planText ?? lastPlanText, taskTracker.goal)) {
+          yield { type: "status", data: `master-plan: ${planProgress(masterPlan!)} nodes` }
+        }
         yield { type: "status", data: "任务追踪: 用户已确认规划，进入执行阶段" }
         planApproved = false
       } else {
         const planningGate = evaluatePlanningArtifact(finalText, taskTracker)
         if (planningGate.ok) {
           markPlanAccepted(taskTracker)
+          if (activateMasterPlan(finalText, taskTracker.goal)) {
+            yield { type: "status", data: `master-plan: ${planProgress(masterPlan!)} nodes` }
+          }
           yield { type: "status", data: "任务追踪: 已读取计划，进入执行阶段" }
           options.runTrace?.record("gate_decision", {
             gate: "planning",
@@ -1263,6 +1463,8 @@ export async function* agentLoop(
       typecheckPassed: lastTypecheck?.passed,
       verificationPassed: verificationPassedThisRound,
       verificationResults: verificationResultsThisRound,
+      skipLegacyStepIds: !!masterPlan,
+      evidenceLedger,
     })
     if (taskTracker) {
       const status = formatTaskTrackerStatus(taskTracker)
@@ -1306,8 +1508,8 @@ export async function* agentLoop(
     }
     rawMessages.push({ role: "user", content: resultsContent })
 
-    // ── Microcompact: retrospective pass — compact historical tool results every 10 rounds ──
-    if (round >= 15 && round % 10 === 0) {
+    // ── Microcompact: retrospective pass — compact historical tool results every 10 rounds, or on epoch force-compress ──
+    if (round >= 15 && round % 10 === 0 || epochAction === "forceCompress" || epochAction === "rollover") {
       const histCompacted = compactHistoricalToolResults(rawMessages, 8)
       if (histCompacted > 0) {
         microcompactCount += histCompacted
@@ -1327,11 +1529,11 @@ export async function* agentLoop(
     // Reset one-shot thinking upgrade
     if (requestedMaxThinking) requestedMaxThinking = false
 
-    // ── Thinking compaction (40% context budget, one-shot per session) ──
+    // ── Thinking compaction (one-shot per session, triggered by epoch force-compress or 40% budget) ──
     if (
       !thinkingCompacted &&
       preRoundCtx.contextBudgetMode === "normal" &&
-      preRoundCtx.contextBudgetPercent >= 40 &&
+      (preRoundCtx.contextBudgetPercent >= 40 || epochAction === "forceCompress" || epochAction === "rollover") &&
       options.thinkingStore
     ) {
       const thinkingRounds = collectThinkingRounds(rawMessages)
@@ -1525,7 +1727,12 @@ export async function* agentLoop(
         round,
         timestamp: Date.now(),
         sessionId: process.env.DEEPSEEK_SESSION_ID ?? "ds-default",
-        masterPlan: taskTracker ? { goal: taskTracker.goal, steps: taskTracker.steps.map(s => ({ id: s.id, status: s.status, title: s.title })) } : {},
+        masterPlan: planRef.current ? {
+          goal: planRef.current.goal,
+          nodes: planRef.current.nodes.map(n => ({ id: n.id, title: n.title, status: n.status })),
+          current: planRef.current.current,
+          progress: planProgress(planRef.current),
+        } : (taskTracker ? { goal: taskTracker.goal, steps: taskTracker.steps.map(s => ({ id: s.id, status: s.status, title: s.title })) } : {}),
         taskSteps: taskTracker?.steps.map(s => ({ id: s.id, status: s.status, title: s.title })) ?? [],
         changedFiles: [...taskFiles],
         fileSHAs: {},
@@ -1545,7 +1752,9 @@ export async function* agentLoop(
           lastVerification: lastTypecheck ? { kind: "typecheck", passed: lastTypecheck.passed, command: "tsc --noEmit" } : null,
           conversationTokens: Math.round(preRoundCtx.contextBudgetPercent * 1000),
           prevRound: round,
-          summary: `Round ${round}: ${taskModifiedFiles} files, ${taskToolErrors} errors`,
+          summary: masterPlan
+            ? `Round ${round}: ${planProgress(masterPlan)}, ${taskModifiedFiles} files, ${taskToolErrors} errors`
+            : `Round ${round}: ${taskModifiedFiles} files, ${taskToolErrors} errors`,
         }),
       })
       recordCheckpointTaken(round)

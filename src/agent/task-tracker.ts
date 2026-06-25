@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import type { VerificationKind, VerificationResult } from "../verification/result"
+import { ingestVerificationResults, type EvidenceLedger } from "./evidence-ledger"
 
 export type TaskIntent = "readonly" | "narrow_edit" | "long_task"
 export type TaskStepStatus = "pending" | "running" | "done" | "failed"
@@ -58,6 +59,11 @@ function verificationKindLabel(kind: VerificationKind): string {
   return "unknown"
 }
 
+/**
+ * @deprecated PR 2 — use {@link createTaskTrackerFromPacket} from "./task-packet" instead.
+ * Keyword-based tracker creation with hardcoded file paths and template steps.
+ * Kept for backward compatibility (loop.ts fallback path, existing tests).
+ */
 export function createTaskTracker(prompt: string, intent: TaskIntent): TaskTracker | null {
   if (intent !== "long_task") return null
   const text = prompt.toLowerCase()
@@ -170,6 +176,11 @@ export function updateTaskTrackerAfterTools(input: {
   typecheckPassed?: boolean
   verificationPassed?: boolean
   verificationResults?: VerificationResult[]
+  /** PR 2: when true, skip hardcoded step-ID matching (backend/frontend/etc.) —
+   *  packet-driven trackers use scope-1/verify-typecheck IDs instead. */
+  skipLegacyStepIds?: boolean
+  /** PR 6: optional evidence ledger — when provided, verification results are also ingested. */
+  evidenceLedger?: EvidenceLedger
 }) {
   const tracker = input.tracker
   if (!tracker || tracker.phase === "complete") return
@@ -182,23 +193,26 @@ export function updateTaskTrackerAfterTools(input: {
     step.evidence = evidence
   }
 
-  if (files.some(file => file.startsWith("server/") || file.includes("/server/"))) {
-    markDone("backend", "已写入后端文件")
-  }
-  if (files.some(file => file.includes("posts.") || file.includes("/data/"))) {
-    markDone("content", "已写入内容数据")
-  }
-  if (files.some(file => file.startsWith("client/") || file.includes("/client/"))) {
-    markDone("frontend", "已写入前端文件")
-  }
-  if (
-    files.some(file => file.startsWith("client/") || file.includes("/client/")) &&
-    (tracker.steps.find(step => step.id === "backend")?.status === "done" || files.some(file => file.startsWith("server/")))
-  ) {
-    markDone("integration", "已同时具备前端和后端文件")
-  }
-  if (input.verificationPassed) {
-    markDone("verification", "验证命令通过")
+  // Legacy step-ID matching — only meaningful for keyword-based trackers
+  if (!input.skipLegacyStepIds) {
+    if (files.some(file => file.startsWith("server/") || file.includes("/server/"))) {
+      markDone("backend", "已写入后端文件")
+    }
+    if (files.some(file => file.includes("posts.") || file.includes("/data/"))) {
+      markDone("content", "已写入内容数据")
+    }
+    if (files.some(file => file.startsWith("client/") || file.includes("/client/"))) {
+      markDone("frontend", "已写入前端文件")
+    }
+    if (
+      files.some(file => file.startsWith("client/") || file.includes("/client/")) &&
+      (tracker.steps.find(step => step.id === "backend")?.status === "done" || files.some(file => file.startsWith("server/")))
+    ) {
+      markDone("integration", "已同时具备前端和后端文件")
+    }
+    if (input.verificationPassed) {
+      markDone("verification", "验证命令通过")
+    }
   }
 
   if (input.typecheckPassed) {
@@ -233,6 +247,11 @@ export function updateTaskTrackerAfterTools(input: {
   }
   if (!tracker.steps.some(step => step.status === "pending" || step.status === "running")) {
     tracker.phase = "complete"
+  }
+
+  // PR 6: also populate evidence ledger when provided
+  if (input.evidenceLedger && input.verificationResults && input.verificationResults.length > 0) {
+    ingestVerificationResults(input.evidenceLedger, input.verificationResults)
   }
 }
 

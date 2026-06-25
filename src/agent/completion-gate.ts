@@ -2,6 +2,7 @@ import type { RippleObligation } from "../ripple/obligations"
 import type { VerificationResult } from "../verification/result"
 import type { TaskTracker } from "./task-tracker"
 import type { UILanguage } from "./language"
+import { hasEvidence, requiredEvidenceKinds, evidenceKindLabel, type EvidenceLedger } from "./evidence-ledger"
 
 export interface CompletionGateInput {
   finalText: string
@@ -13,6 +14,8 @@ export interface CompletionGateInput {
   taskHadWrite: boolean
   toolErrors: number
   lastTypecheck?: { passed: boolean; issues: number; output?: string }
+  /** PR 6: optional evidence ledger for structured evidence check. */
+  evidenceLedger?: EvidenceLedger
 }
 
 export interface CompletionGateReport {
@@ -58,8 +61,10 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
   if (input.missingTaskRequirements.length > 0) {
     missing.push(...input.missingTaskRequirements)
   }
-  if (input.pendingRippleObligations.length > 0) {
-    missing.push(`pending ripple obligations: ${input.pendingRippleObligations.length}`)
+  // PR 7: only non-waived ripple obligations block completion
+  const blockingRipple = input.pendingRippleObligations.filter(o => !o.waiver)
+  if (blockingRipple.length > 0) {
+    missing.push(`未解决的涟漪义务: ${blockingRipple.length} 个调用方未同步 (需级联修复或显式豁免)`)
   }
   if (input.lastTypecheck && !input.lastTypecheck.passed) {
     missing.push(`typecheck failed: ${input.lastTypecheck.issues} issue(s)`)
@@ -73,6 +78,15 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
   if (input.taskTracker) {
     for (const kind of input.taskTracker.requiredVerificationKinds) {
       if (!input.taskTracker.verificationEvidence[kind]) missing.push(`missing required verification: ${kind}`)
+    }
+  }
+  // PR 6: Evidence Ledger — structured evidence check as reinforcement
+  if (input.evidenceLedger && input.taskTracker && input.taskTracker.requiredVerificationKinds.length > 0) {
+    const required = requiredEvidenceKinds(input.taskTracker)
+    for (const kind of required) {
+      if (!hasEvidence(input.evidenceLedger, kind)) {
+        missing.push(`缺少结构化验证证据: ${evidenceKindLabel(kind)}`)
+      }
     }
   }
   if (!input.finalText.trim()) {
