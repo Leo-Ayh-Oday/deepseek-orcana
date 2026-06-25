@@ -17,8 +17,11 @@ import type { Gate } from "./types"
 import type { CompletionContext } from "./contexts"
 import { compactAssistantContext, buildAgentContractContext, formatQualityGatePrompt } from "../round/helpers"
 import { evaluatePlanningArtifact, forcePlanningPassAfterLimit, formatPlanningGatePrompt } from "../planning-gate"
+import { evaluatePlanForcePass } from "../plan-validator"
+import type { TaskPacket } from "../task-packet"
 import { markPlanAccepted, missingTaskRequirements, taskTrackerComplete, formatTaskTrackerPrompt } from "../task-tracker"
 import { formatRippleExitGateCallers } from "../../ripple/engine"
+import { getBlockingObligations } from "../../ripple/obligations"
 import { validateContracts } from "../contracts"
 import { AgentState } from "../state-machine"
 import type { ObjectiveSignals } from "../../evaluator/types"
@@ -45,16 +48,17 @@ export class RippleExitGate implements Gate<CompletionContext> {
 
   evaluate(ctx: CompletionContext) {
     if (ctx.intentPolicy.mode === "readonly") return pass(ctx), { pass: true }
-    if (ctx.pendingRippleObligations.length === 0) return pass(ctx), { pass: true }
+    const blocking = getBlockingObligations(ctx.pendingRippleObligations)
+    if (blocking.length === 0) return pass(ctx), { pass: true }
     if (ctx.round + 1 >= ctx.maxRounds) return pass(ctx), { pass: true }
 
     const assistantMsg = compactAssistantContext(ctx.finalText)
     const userMsg = formatRippleExitGateCallers(
-      ctx.pendingRippleObligations.map(o => ({ caller: o.caller, symbol: o.symbol }))
+      blocking.map(o => ({ caller: o.caller, symbol: o.symbol }))
     )
     continue_(ctx, "ripple_exit", assistantMsg, userMsg,
-      `ripple-exit-gate: pending ${ctx.pendingRippleObligations.length}`,
-      { pending: ctx.pendingRippleObligations.length })
+      `ripple-exit-gate: pending ${blocking.length}`,
+      { pending: blocking.length })
     ctx.completionBlockMessage = userMsg
     return { pass: false, reason: "ripple_exit" }
   }
@@ -86,26 +90,35 @@ export class PlanningArtifactGate implements Gate<CompletionContext> {
     const planningGate = evaluatePlanningArtifact(ctx.finalText, ctx.taskTracker)
     const assistantMsg = compactAssistantContext(ctx.finalText)
 
-    if (!planningGate.ok && !forcePlanningPassAfterLimit(ctx.planningRejections)) {
-      // Revision needed — increment rejection counter, continue loop
-      const userMsg = formatPlanningGatePrompt(planningGate, ctx.taskTracker)
-      continue_(ctx, "planning_revise", assistantMsg, userMsg,
-        `planning-gate: revise plan (${planningGate.missing.length} missing)`,
-        { missing: planningGate.missing, score: planningGate.score })
-      ctx.completionBlockMessage = userMsg
-      // Signal loop.ts to increment planningRejections
-      ;(ctx as unknown as Record<string, unknown>)._planningRejected = true
-      return { pass: false, reason: "planning_revise" }
+    if (!planningGate.ok) {
+      // PR 3: use evaluatePlanForcePass instead of bare forcePlanningPassAfterLimit
+      const forceResult = evaluatePlanForcePass({
+        rejections: ctx.planningRejections,
+        planText: ctx.finalText,
+        goal: ctx.taskTracker.goal,
+      })
+
+      if (!forceResult.allow) {
+        // Still within retry budget — revision needed
+        const userMsg = formatPlanningGatePrompt(planningGate, ctx.taskTracker)
+        continue_(ctx, "planning_revise", assistantMsg, userMsg,
+          `planning-gate: revise plan (${planningGate.missing.length} missing)`,
+          { missing: planningGate.missing, score: planningGate.score })
+        ctx.completionBlockMessage = userMsg
+        ;(ctx as unknown as Record<string, unknown>)._planningRejected = true
+        return { pass: false, reason: "planning_revise" }
+      }
+
+      // Force-pass with minimal viable packet
+      ;(ctx as unknown as Record<string, unknown>)._planningForcePass = true
+      ;(ctx as unknown as Record<string, unknown>)._planningForcePassPacket = forceResult.fallbackPacket
     }
 
-    // Plan passed (or force-passed)
+    // Plan passed (or force-passed with packet)
     ;(ctx as unknown as Record<string, unknown>)._planningPassed = true
     ;(ctx as unknown as Record<string, unknown>)._planningScore = planningGate.score
     ;(ctx as unknown as Record<string, unknown>)._planningSignals = planningGate.signals
     ;(ctx as unknown as Record<string, unknown>)._planningMissing = planningGate.missing
-    if (!planningGate.ok) {
-      ;(ctx as unknown as Record<string, unknown>)._planningForcePass = true
-    }
 
     // Plan ready — yield plan_ready, break for user approval
     // loop.ts handles the yield + break after chain returns

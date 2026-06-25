@@ -1,4 +1,4 @@
-import type { RippleObligation } from "../ripple/obligations"
+import { getBlockingObligations, type RippleObligation } from "../ripple/obligations"
 import type { VerificationResult } from "../verification/result"
 import type { TaskTracker } from "./task-tracker"
 import type { UILanguage } from "./language"
@@ -62,7 +62,7 @@ export function evaluateCompletionGate(input: CompletionGateInput): CompletionGa
     missing.push(...input.missingTaskRequirements)
   }
   // PR 7: only non-waived ripple obligations block completion
-  const blockingRipple = input.pendingRippleObligations.filter(o => !o.waiver)
+  const blockingRipple = getBlockingObligations(input.pendingRippleObligations)
   if (blockingRipple.length > 0) {
     missing.push(`未解决的涟漪义务: ${blockingRipple.length} 个调用方未同步 (需级联修复或显式豁免)`)
   }

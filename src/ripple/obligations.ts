@@ -1,11 +1,19 @@
 import { relative, resolve } from "node:path"
 import type { RippleCaller, RippleReport } from "./types"
 
+/** PR 7: A waiver dismisses a ripple obligation with a required reason. */
+export interface RippleWaiver {
+  reason: string
+  timestamp: number
+}
+
 export interface RippleObligation {
   targetFile: string
   symbol: string
   caller: RippleCaller
   reason: string
+  /** PR 7: When set, this obligation is explicitly waived. Must include a reason. */
+  waiver?: RippleWaiver
 }
 
 export function normalizeProjectPath(path: string, projectRoot = process.cwd()): string {
@@ -61,5 +69,39 @@ export function formatRippleExitGate(obligations: RippleObligation[]): string {
   lines.push("2. Prepare one multi_edit cascade that updates the target and affected callers together.")
   lines.push("3. Verify with typecheck/tests.")
   lines.push("4. If the cascade write fails verification and repair is riskier than revert, use rollback_transaction with the returned transactionId.")
+  return lines.join("\n")
+}
+
+// ── PR 7: Waiver mechanism — ripple obligations as hard obligations ──
+
+/** Waive a ripple obligation. Returns a new obligation with waiver attached.
+ *  An empty or whitespace-only reason is rejected (returns the obligation unchanged).
+ *  This enforces "waiver 必须有 reason" — no silent dismissal. */
+export function waiveObligation(obligation: RippleObligation, reason: string): RippleObligation {
+  if (!reason.trim()) return obligation
+  return {
+    ...obligation,
+    waiver: { reason: reason.trim(), timestamp: Date.now() },
+  }
+}
+
+/** True when this obligation still blocks completion (not waived). */
+export function isObligationBlocking(obligation: RippleObligation): boolean {
+  return !obligation.waiver
+}
+
+/** Filter to only blocking (non-waived) obligations. */
+export function getBlockingObligations(obligations: RippleObligation[]): RippleObligation[] {
+  return obligations.filter(isObligationBlocking)
+}
+
+/** Format waived obligations for status display (audit trail). */
+export function formatWaivedObligations(obligations: RippleObligation[]): string {
+  const waived = obligations.filter(o => o.waiver)
+  if (waived.length === 0) return ""
+  const lines = ["## Waived Ripple Obligations"]
+  for (const o of waived) {
+    lines.push(`- ${o.caller.file}:${o.caller.line} ${o.symbol}: ${o.waiver!.reason}`)
+  }
   return lines.join("\n")
 }

@@ -20,7 +20,7 @@ import { validatePlan, validateNode, formatValidationReport } from "./plan-valid
 import { mergeProviderTokenUsage } from "../provider/usage"
 import { setRuntimeContextBudgetMode } from "./runtime-context"
 import type { RippleReport } from "../ripple/types"
-import { mergeObligations, normalizeProjectPath, obligationsFromReport, resolveObligations, type RippleObligation } from "../ripple/obligations"
+import { getBlockingObligations, mergeObligations, normalizeProjectPath, obligationsFromReport, resolveObligations, type RippleObligation } from "../ripple/obligations"
 import { setCascadeFiles } from "../ripple/engine"
 import type { ModelRouter } from "../provider/router"
 import { ConfidenceEvaluator } from "../evaluator/confidence"
@@ -1331,7 +1331,7 @@ export async function* agentLoop(
         options.autoFinishOnVerifiedWrite &&
         intentPolicy.mode === "narrow_edit" &&
         hadTsWriteThisRound &&
-        pendingRippleObligations.length === 0 &&
+        getBlockingObligations(pendingRippleObligations).length === 0 &&
         lastTypecheck?.passed &&
         missingNarrowFiles.length === 0
       ) {
@@ -1357,7 +1357,7 @@ export async function* agentLoop(
     const overflowResult = processGateOverflow({
       round,
       rippleBlockActive,
-      pendingRippleObligationsLength: pendingRippleObligations.length,
+      pendingRippleObligationsLength: getBlockingObligations(pendingRippleObligations).length,
       postToolPlanningPrompt,
       postToolRequiredFilesPrompt,
       gateBlockCounts,

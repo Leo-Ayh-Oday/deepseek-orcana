@@ -15,7 +15,7 @@ import type { Gate, GateResult } from "./types"
 import type { PreRoundContext } from "./contexts"
 import { selectTools } from "../tool-disclosure"
 import type { RippleReport } from "../../ripple/types"
-import type { RippleObligation } from "../../ripple/obligations"
+import { getBlockingObligations, type RippleObligation } from "../../ripple/obligations"
 
 // ── Gate: Tool Disclosure ──
 
@@ -78,7 +78,7 @@ export class RippleToolFilterGate implements Gate<PreRoundContext> {
 }
 
 function strongestRippleDecision(reports: RippleReport[], pending: RippleObligation[]): "allow" | "warn" | "block" | undefined {
-  if (pending.length > 0) return "warn"
+  if (getBlockingObligations(pending).length > 0) return "warn"
   if (reports.some(report => report.decision === "block")) return "block"
   if (reports.some(report => report.decision === "warn")) return "warn"
   if (reports.length > 0) return "allow"
