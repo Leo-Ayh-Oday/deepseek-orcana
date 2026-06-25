@@ -56,6 +56,7 @@ interface AgentState {
   task: TaskProgressState | null
   done: boolean
   error: string
+  queueCount: number
 }
 
 interface ClarificationWizardState {
@@ -95,6 +96,10 @@ const SLASH_COMMANDS: SlashCommandHint[] = [
 ]
 
 const TUI_STARTUP_MS = 2400
+const TUI_STREAM_FLUSH_MS = Number(process.env.DEEPSEEK_TUI_STREAM_FLUSH_MS ?? "120")
+const TUI_FRAME_MS = Number(process.env.DEEPSEEK_TUI_FRAME_MS ?? "320")
+const TUI_IDLE_FRAME_MS = Number(process.env.DEEPSEEK_TUI_IDLE_FRAME_MS ?? "500")
+const TUI_SCROLL_STEP = Number(process.env.DEEPSEEK_TUI_SCROLL_STEP ?? "3")
 
 function TuiInputGuard() {
   useInput(() => {
@@ -110,8 +115,8 @@ function useMouseWheelScroll(active: boolean, onScrollUp: () => void, onScrollDo
 
   useEffect(() => {
     if (!active || !stdin?.on || !stdout?.write) return
-    const enableMouse = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
-    const disableMouse = "\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+    const enableMouse = "\x1b[?1000h\x1b[?1006h"
+    const disableMouse = "\x1b[?1006l\x1b[?1000l"
     stdout.write(enableMouse)
     const handleData = (data: Buffer | string) => {
       const text = data.toString("utf8")
@@ -153,6 +158,7 @@ function initialState(): AgentState {
     task: null,
     done: false,
     error: "",
+    queueCount: 0,
   }
 }
 
@@ -160,12 +166,19 @@ function useAgentStream(apiKey: string, prompt?: string) {
   const historyRef = useRef<Array<{ role: ModelHistoryRole; content: string }>>([])
   const messageIdRef = useRef(0)
   const lastEventRef = useRef<{ key: string; at: number } | null>(null)
+  const runningRef = useRef(false)
+  const queuedPromptsRef = useRef<string[]>([])
+  const runAgentRef = useRef<(prompt: string) => void>(() => {})
   const [clarification, setClarification] = useState<ClarificationWizardState | null>(null)
   const [state, setState] = useState<AgentState>(() => ({
     ...initialState(),
     status: prompt?.trim() ? "starting..." : "ready",
     done: !prompt?.trim(),
   }))
+
+  const refreshQueueCount = useCallback(() => {
+    setState(s => ({ ...s, queueCount: queuedPromptsRef.current.length }))
+  }, [])
 
   const addSystemMessage = useCallback((content: string) => {
     const assistantId = ++messageIdRef.current
@@ -200,6 +213,8 @@ function useAgentStream(apiKey: string, prompt?: string) {
   }, [])
 
   const runAgent = useCallback((p: string) => {
+    runningRef.current = true
+    refreshQueueCount()
     const historySnapshot = historyRef.current.slice()
     const userId = ++messageIdRef.current
     const assistantId = ++messageIdRef.current
@@ -230,9 +245,17 @@ function useAgentStream(apiKey: string, prompt?: string) {
     }
 
     let cancelled = false
+    let clarified = false
     let textBuf = ""
     let assistantText = ""
     let lastFlush = 0
+
+    const finishRun = () => {
+      runningRef.current = false
+      const nextPrompt = queuedPromptsRef.current.shift()
+      setState(s => ({ ...s, queueCount: queuedPromptsRef.current.length }))
+      if (nextPrompt) setTimeout(() => runAgentRef.current(nextPrompt), 0)
+    }
 
     setState(prev => ({
       ...prev,
@@ -244,7 +267,7 @@ function useAgentStream(apiKey: string, prompt?: string) {
       task: null,
       messages: [
         ...prev.messages,
-        { id: userId, role: "user", content: p },
+        { id: userId, role: "user", content: summarizeUserPromptForTranscript(p) },
         { id: assistantId, role: "assistant", content: "", pending: true },
       ],
     }))
@@ -259,7 +282,7 @@ function useAgentStream(apiKey: string, prompt?: string) {
         text: prev.text + chunk,
         messages: prev.messages.map(message =>
           message.id === assistantId
-            ? { ...message, content: compactAssistantText(message.content + chunk), pending: true }
+            ? { ...message, content: appendAssistantText(message.content, chunk), pending: true }
             : message,
         ),
       }))
@@ -273,7 +296,7 @@ function useAgentStream(apiKey: string, prompt?: string) {
             if (typeof ev.data === "string") {
               assistantText += ev.data
               textBuf += ev.data
-              if (Date.now() - lastFlush > 80) flush()
+              if (Date.now() - lastFlush > TUI_STREAM_FLUSH_MS) flush()
             }
             break
           case "status":
@@ -376,16 +399,19 @@ function useAgentStream(apiKey: string, prompt?: string) {
               extraPrompt: d.extraPrompt,
               rawText: d.rawText,
             })
+            runningRef.current = false
             setState(s => ({
               ...s,
               status: "clarification needed",
               done: true,
+              queueCount: queuedPromptsRef.current.length,
               messages: s.messages.map(message =>
                 message.id === assistantId
                   ? { ...message, content: visibleText, pending: false }
                   : message,
               ),
             }))
+            clarified = true
             return
           }
           case "error":
@@ -411,6 +437,7 @@ function useAgentStream(apiKey: string, prompt?: string) {
           message.id === assistantId ? { ...message, pending: false } : message,
         ),
       }))
+      if (!clarified) finishRun()
     })().catch(error => {
       const message = error instanceof Error ? error.message : String(error)
       setState(s => ({
@@ -423,6 +450,7 @@ function useAgentStream(apiKey: string, prompt?: string) {
             : item,
         ),
       }))
+      if (!clarified) finishRun()
     })
 
     return () => { cancelled = true }
@@ -466,6 +494,10 @@ function useAgentStream(apiKey: string, prompt?: string) {
     addSystemMessage("Clarification cancelled. Add more detail in the input box when you are ready.")
   }, [addSystemMessage])
 
+  useEffect(() => {
+    runAgentRef.current = runAgent
+  }, [runAgent])
+
   const submit = useCallback((newPrompt: string) => {
     const command = newPrompt.trim()
     if (command.startsWith("/")) {
@@ -493,6 +525,19 @@ function useAgentStream(apiKey: string, prompt?: string) {
       }
     }
 
+    if (runningRef.current) {
+      queuedPromptsRef.current.push(newPrompt)
+      const pos = queuedPromptsRef.current.length
+      setState(s => ({
+        ...s,
+        queueCount: queuedPromptsRef.current.length,
+        messages: [
+          ...s.messages,
+          { id: ++messageIdRef.current, role: "event", kind: "task", content: `queued user message #${pos}\n${summarizeQueuedPromptForTranscript(newPrompt)}` },
+        ],
+      }))
+      return
+    }
     runAgent(newPrompt)
   }, [addSystemMessage, runAgent])
 
@@ -554,6 +599,36 @@ function EmptySurface() {
 
 function fitText(text: string, width: number): string {
   return fitTerminalText(text, width)
+}
+
+function summarizeUserPromptForTranscript(text: string): string {
+  const norm = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+  const lines = norm ? norm.split("\n").length : 0
+  const chars = norm.length
+  const maxChars = Number(process.env.DEEPSEEK_TUI_USER_DISPLAY_CHARS ?? "1600")
+  const maxLines = Number(process.env.DEEPSEEK_TUI_USER_DISPLAY_LINES ?? "12")
+  if (chars <= maxChars && lines <= maxLines) return text
+  const first = norm.split("\n").map(l => l.trim()).find(Boolean)
+  const preview = first ? `\npreview: ${first.slice(0, 180)}` : ""
+  return `[Pasted text loaded: +${lines} lines, ${chars} chars]${preview}`
+}
+
+function summarizeQueuedPromptForTranscript(text: string): string {
+  const norm = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+  const lines = norm ? norm.split("\n").length : 0
+  const chars = norm.length
+  const first = norm.split("\n").map(l => l.trim()).find(Boolean)
+  const preview = first ? first.slice(0, 180) : ""
+  if (chars <= 280 && lines <= 3) return preview || norm
+  const label = `[queued while agent is working: +${lines} lines, ${chars} chars]`
+  return preview ? `${label}\npreview: ${preview}` : label
+}
+
+function appendAssistantText(current: string, chunk: string): string {
+  if (!current) return chunk
+  if (!chunk) return current
+  if (current.slice(-1) === "\n" && chunk === "\n") return current
+  return current + chunk
 }
 
 function compactAssistantText(text: string): string {
@@ -796,16 +871,22 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
   const [tick, setTick] = useState(0)
   const [scrollOffset, setScrollOffset] = useState(0)
   const [scrollState, setScrollState] = useState<TranscriptScrollState>({ maxOffset: 0, normalizedOffset: 0, hiddenAbove: false, hiddenBelow: false })
+  const [autoFollow, setAutoFollow] = useState(true)
   const [showStartup, setShowStartup] = useState(process.env.DEEPSEEK_TUI_SPLASH !== "off")
-  const mouseScrollEnabled = process.env.DEEPSEEK_TUI_MOUSE === "on"
+  const mouseScrollEnabled = process.env.DEEPSEEK_TUI_MOUSE !== "off"
   const footerHeight = clarification ? 12 : state.task ? 11 : 6
   const bodyHeight = Math.max(10, rows - footerHeight - 3)
   const isWorking = !state.done && !state.error
-  const scrollUp = useCallback((amount = 3) => {
+  const scrollUp = useCallback((amount = TUI_SCROLL_STEP) => {
+    setAutoFollow(false)
     setScrollOffset(offset => offset + amount)
   }, [])
-  const scrollDown = useCallback((amount = 3) => {
-    setScrollOffset(offset => Math.max(0, offset - amount))
+  const scrollDown = useCallback((amount = TUI_SCROLL_STEP) => {
+    setScrollOffset(offset => {
+      const next = Math.max(0, offset - amount)
+      if (next === 0) setAutoFollow(true)
+      return next
+    })
   }, [])
 
   useEffect(() => {
@@ -818,7 +899,7 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
   useEffect(() => {
     const animated = showStartup || isWorking || Boolean(clarification) || state.task?.phase === "planning"
     if (!animated) return
-    const timer = setInterval(() => setTick(n => n + 1), isWorking ? 180 : 260)
+    const timer = setInterval(() => setTick(n => n + 1), isWorking ? TUI_FRAME_MS : TUI_IDLE_FRAME_MS)
     return () => clearInterval(timer)
   }, [clarification, isWorking, showStartup, state.task?.phase])
 
@@ -887,14 +968,15 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
   }, { isActive: !showStartup })
 
   useEffect(() => {
-    setScrollOffset(0)
-  }, [state.messages.length])
+    if (autoFollow) setScrollOffset(0)
+  }, [autoFollow, state.messages.length])
 
   useEffect(() => {
     setScrollOffset(offset => Math.min(offset, scrollState.maxOffset))
   }, [scrollState.maxOffset])
 
   const hasDash = state.dash.round > 0 || state.dash.toolHistory.length > 0
+  const showDash = hasDash && cols >= 110
   if (showStartup) {
     return (
       <Box height={rows} paddingX={1} flexDirection="column">
@@ -923,7 +1005,7 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
           <Text color={C.blue}>model {state.modelName}</Text>
           <Text color={C.dim}> / </Text>
           <StatusMark done={state.done} error={state.error} tick={tick} />
-          <Text color={C.dim}>{state.status ? ` / ${state.status}` : ""}</Text>
+          <Text color={C.dim}>{state.status ? ` / ${state.status}` : ""}{state.queueCount > 0 ? ` / queued ${state.queueCount}` : ""}</Text>
         </Box>
         <SonarLine tick={tick} width={cols} active={isWorking} />
       </Box>
@@ -942,7 +1024,7 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
             ) : (
               <ChatTranscript
                 messages={state.messages}
-                width={cols - (hasDash ? 44 : 2)}
+                width={cols - (showDash ? 44 : 2)}
                 height={Math.max(4, bodyHeight - 3)}
                 tick={tick}
                 status={state.status}
@@ -954,7 +1036,7 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
           {state.error && <Text color={C.red}>{state.error}</Text>}
         </Box>
 
-        {hasDash && (
+        {showDash && (
           <Box width={42}>
             <Dashboard {...state.dash} />
           </Box>
@@ -969,9 +1051,9 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
         )}
         <InputLine
           onSubmit={submit}
-          disabled={!state.done || Boolean(clarification)}
-          placeholder={clarification ? "Use the selector above..." : state.done ? "Ask a follow-up..." : "DeepSeek Code is working..."}
-          status={state.status}
+          disabled={showStartup ? true : false}
+          placeholder={clarification ? "Use the selector above..." : isWorking ? "Type a follow-up; Enter queues it for the next turn..." : "Message DeepSeek Code..."}
+          status={isWorking ? `agent running · Enter queues next message${state.queueCount > 0 ? ` · queued ${state.queueCount}` : ""}` : state.status}
           commands={SLASH_COMMANDS}
           focused={state.done && !clarification}
           onScrollUp={() => scrollUp(3)}
@@ -979,7 +1061,7 @@ export function ChatApp({ prompt, apiKey }: { prompt?: string; apiKey: string })
         />
         <Box paddingX={1}>
           <Text color={C.dim}>
-            {state.telemetry || `model ${state.modelName} / ctx 0% / cache 0% / round 0`}  scroll: {mouseScrollEnabled ? "wheel, " : ""}k/j, PgUp/PgDn
+            {state.telemetry || `model ${state.modelName} / ctx 0% / cache 0% / round 0`}{state.queueCount > 0 ? ` / queued ${state.queueCount}` : ""}  scroll: {mouseScrollEnabled ? "wheel, " : ""}k/j, PgUp/PgDn · {autoFollow ? "auto" : "manual"}
           </Text>
         </Box>
       </Box>
